@@ -18,3 +18,7 @@ package-lock.json
 .kotlin/
 .cxx
 .vscode
+
+# Project-local Android build tools, caches, and private signing material.
+/.build-env/
+/.signing/
