@@ -273,6 +273,31 @@ object McpToolServer {
         }
 
         server.addTool(
+            name = "import_source_file",
+            description = "导入运行 MCP 服务的 Android 设备上的书源文件，只需传设备端绝对路径。" +
+                "支持 UTF-8（含 BOM）的 BookSource JSON 对象/数组或 JS 单文件源；" +
+                "文件最大 10 MiB，单个书源最大 1 MiB。覆盖时保留用户状态，仅返回数量、名称和 URL 摘要。",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    put("path", stringProp("Android 设备上可读取的绝对文件路径，例如 /storage/emulated/0/Download/sources.json"))
+                    put("format", stringProp("js|json；缺省时根据文件内容自动识别"))
+                },
+                required = listOf("path"),
+            ),
+            toolAnnotations = openWorldWriteToolAnnotations,
+        ) { request ->
+            try {
+                val path = request.arguments.str("path")
+                    ?: return@addTool err("参数 path 不能为空")
+                ok(McpSourceFileImporter.importFile(path, request.arguments.str("format")))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                err(error.localizedMessage ?: error.toString())
+            }
+        }
+
+        server.addTool(
             name = "debug_source",
             description = "运行应用内书源调试并返回逐步日志。key 可为关键词、绝对 URL、::URL、++URL 或 --URL。",
             inputSchema = ToolSchema(

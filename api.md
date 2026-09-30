@@ -123,7 +123,7 @@ X-Legado-Token = 设置中配置的令牌（访问令牌保护开启时）
 }
 ```
 
-服务提供 13 个工具：`save_source`、`debug_source`、`list_sources`、`get_source`、`delete_sources`、
+服务提供 14 个工具：`save_source`、`import_source_file`、`debug_source`、`list_sources`、`get_source`、`delete_sources`、
 `get_http_logs`、`get_http_log`、`set_http_log_recording`、`get_cookies`、`set_cookie`、
 `clear_cookies`、`eval_js`、`check_source`。书源写入、删除、调试、日志开关、Cookie 持久层写入和清理、
 脚本求值及批量校验均可能修改应用状态；`check_source` 会按当前应用配置更新书源分组、错误备注和响应时间。
@@ -139,6 +139,30 @@ X-Legado-Token = 设置中配置的令牌（访问令牌保护开启时）
 `eval_js` 可在应用书源环境执行任意 JavaScript，令牌等同于书源脚本执行权限；求值结果和 `java.log`
 输出不会脱敏，也可能访问网络、Cookie、缓存及已绑定书源的数据。传入书源 URL 只绑定其运行时身份，
 不会自动执行该书源的 `mainJs`。
+
+`import_source_file` 从**运行 MCP 服务的 Android 设备**读取书源文件并保存。AI 只需传文件路径，
+无需再次传输书源全文；路径不指向 AI 客户端或电脑上的文件。文件必须是应用当前有权读取的绝对路径，
+不支持 URL、`file://` 或 `content://` URI，也不会自动申请额外的存储权限。
+
+```json
+{
+  "name": "import_source_file",
+  "arguments": {
+    "path": "/storage/emulated/0/Download/sources.json"
+  }
+}
+```
+
+文件使用 UTF-8 编码（允许 BOM），支持单个声明式 BookSource JSON 对象、对象数组或纯 JavaScript 单文件书源。
+默认根据内容识别格式，也可传 `"format": "json"` 或 `"format": "js"`。文件最大 10 MiB，
+每个 JSON 书源或 JS 脚本最大 1 MiB；JSON 中非空的 `mainJs` 与 `save_source` 一样不接受，
+应把脚本原文保存为文件并按 JS 导入。JS 导入复用现有提取、校验和保存流程，可能执行脚本并访问网络，
+等待保存锁和解析脚本各自最多 30 秒。
+
+JSON 数组先完整校验，再在同一数据库事务中保存，格式错误不会造成部分导入。
+按 `bookSourceUrl` 新建或覆盖；覆盖时保留启用状态、发现开关、排序、权重、响应时间，以及传入分组为空时的原分组，
+内容未变化时保留更新时间。成功只返回导入数量、名称和 URL 摘要，摘要最多 10000 字符并附截断提示，
+不返回书源规则或脚本全文。文件不存在、无读取权限、编码错误、超过大小限制或书源校验失败时，工具返回 `isError: true`。
 
 服务还会将应用内置 Markdown 帮助文档作为只读 resources 暴露，URI 格式为 `legado://help/<文件名>`，
 例如 `legado://help/jsHelp` 和 `legado://help/ruleHelp`。客户端可先列出 resources，再按 URI 读取；
