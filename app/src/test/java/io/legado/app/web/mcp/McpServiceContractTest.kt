@@ -30,9 +30,9 @@ class McpServiceContractTest {
         assertTrue(route > auth)
         assertTrue(application.contains("context.request.header(McpAccess.TOKEN_HEADER)"))
         assertTrue(application.contains("HttpStatusCode.Unauthorized"))
-        assertFalse(application.contains("allowedHosts"))
-        assertTrue(application.contains("context.request.header(HttpHeaders.Origin)"))
-        assertTrue(application.contains("enableDnsRebindingProtection = false"))
+        assertTrue(application.contains("allowedHosts = allowedHosts"))
+        assertTrue(application.contains("allowedOrigins = allowedOrigins"))
+        assertFalse(application.contains("enableDnsRebindingProtection = false"))
         assertFalse(application.contains("request.path()"))
         assertTrue(application.contains("tokenRequiredProvider()"))
 
@@ -320,8 +320,7 @@ class McpServiceContractTest {
         val proguard = projectFile("app/proguard-rules.pro")
 
         assertTrue(api.contains("X-Legado-Token"))
-        assertTrue(api.contains("不限制请求的 Host"))
-        assertTrue(api.contains("Origin 校验"))
+        assertTrue(api.contains("Host 和 Origin 校验"))
         assertTrue(api.contains("可信局域网"))
         assertTrue(api.contains("令牌等同于书源脚本执行权限"))
         assertTrue(api.contains("eval_js"))
