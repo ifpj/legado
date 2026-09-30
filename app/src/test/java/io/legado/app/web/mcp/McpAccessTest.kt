@@ -8,11 +8,8 @@ import java.net.InetAddress
 class McpAccessTest {
 
     @Test
-    fun hostAndOriginAllowListsIncludeLoopbackAndLan() {
+    fun originAllowListIncludesLoopbackAndLan() {
         val address = InetAddress.getByName("192.168.3.9")
-        val hosts = McpAccess.allowedHosts(listOf(address, address))
-
-        assertEquals(listOf("localhost", "127.0.0.1", "[::1]", "192.168.3.9"), hosts)
         assertEquals(
             listOf(
                 "http://localhost",
@@ -20,7 +17,7 @@ class McpAccessTest {
                 "http://[::1]",
                 "http://192.168.3.9",
             ),
-            McpAccess.allowedOrigins(hosts),
+            McpAccess.allowedOrigins(listOf(address, address)),
         )
     }
 
