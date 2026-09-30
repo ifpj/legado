@@ -172,7 +172,8 @@ class McpService : BaseService() {
         stopEngine()
         val addresses = NetworkUtils.getLocalIPAddress()
         val port = getPort()
-        val allowedOrigins = McpAccess.allowedOrigins(addresses)
+        val allowedHosts = McpAccess.allowedHosts(addresses)
+        val allowedOrigins = McpAccess.allowedOrigins(allowedHosts)
         try {
             val nextEngine = embeddedServer(CIO, port = port, host = "0.0.0.0") {
                 configureMcp(
@@ -181,6 +182,7 @@ class McpService : BaseService() {
                     unauthorizedMessage = {
                         this@McpService.getString(R.string.mcp_service_token_invalid)
                     },
+                    allowedHosts = allowedHosts,
                     allowedOrigins = allowedOrigins,
                 ) {
                     McpToolServer.create()
