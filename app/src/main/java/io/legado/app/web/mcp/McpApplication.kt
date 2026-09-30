@@ -38,6 +38,7 @@ fun Application.configureMcp(
     }
     mcpStreamableHttp(
         path = McpAccess.PATH,
+        enableDnsRebindingProtection = false,
         allowedHosts = allowedHosts,
         allowedOrigins = allowedOrigins,
         block = serverFactory,
