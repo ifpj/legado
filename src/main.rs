@@ -417,23 +417,14 @@ async fn recommendation(
             let home = api
                 .get(
                     "/reading/bookapi/bookmall/tab/v",
-                    params(&[("tab_type", "2")]),
+                    params(&[("tab_type", "2"), ("client_fetch_unlimited_mode", "1")]),
                 )
                 .await?;
-            let tab = home["tab_item"]
-                .as_array()
-                .and_then(|a| a.iter().find(|v| number(&v["tab_type"]) == 2))
-                .ok_or_else(|| anyhow!("官方暂未提供推荐频道"))?;
-            let cell = tab["cell_data"]
-                .as_array()
-                .and_then(|a| {
-                    a.iter()
-                        .find(|v| matches!(model::s(v, "show_type").as_str(), "337" | "384"))
-                })
-                .ok_or_else(|| anyhow!("官方暂未提供连续推荐流"))?;
+            let tab = recommendation_tab(&home)?;
+            let cell = recommendation_cell(tab)?;
             state.cell_id = model::s(cell, "cell_id");
             state.show_type = model::s(cell, "show_type");
-            state.cursor = json!({"offset":model::book_rows(cell).len(),"sessionId":model::s(tab,"session_id"),"done":false});
+            state.cursor = recommendation_cursor(tab, None, "2")?;
             state.rows = recommendation_rows(
                 if url == "fanqie://home" { tab } else { cell },
                 &mut state.seen,
@@ -441,51 +432,65 @@ async fn recommendation(
         }
     }
     if state.rows.is_empty() && !model::boolean(&state.cursor["done"]) {
-        // EXCHANGE requests restart the high-score selection, excluding all
-        // displayed books. LANDPAGE advances the real unlimited feed cursor.
-        let high = url == "fanqie://cell/119";
-        let recent = state
-            .seen
-            .iter()
-            .rev()
-            .take(500)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(",");
-        let data = api
-            .get(
-                "/reading/bookapi/bookmall/cell/change/v",
-                params(&[
-                    ("cell_id", &state.cell_id),
-                    ("show_type", &state.show_type),
-                    ("cell_sub_id", "0"),
-                    ("tab_type", "2"),
-                    (
-                        "offset",
-                        &if high {
-                            "0".into()
-                        } else {
-                            model::s(&state.cursor, "offset")
-                        },
-                    ),
-                    ("limit", "20"),
-                    ("change_type", if high { "0" } else { "1" }),
-                    ("filter_ids", &recent),
-                    ("force_filter_ids", &recent),
-                    ("session_id", &model::s(&state.cursor, "sessionId")),
-                ]),
-            )
-            .await?;
-        state.rows = recommendation_rows(data.get("cell_view").unwrap_or(&data), &mut state.seen);
-        let next = data
-            .get("next_offset")
-            .map(number)
-            .unwrap_or(number(&state.cursor["offset"]) + 20);
-        ensure!(
-            high || !model::boolean(&data["has_more"]) || next != number(&state.cursor["offset"]),
-            "官方推荐游标未推进，请刷新重试"
-        );
-        state.cursor = json!({"offset":next,"sessionId":model::s(&data,"session_id"),"done":!high && !model::boolean(&data["has_more"])});
+        if url == "fanqie://cell/119" {
+            // High-score selections use EXCHANGE and exclude displayed books.
+            let recent = state
+                .seen
+                .iter()
+                .rev()
+                .take(500)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(",");
+            let data = api
+                .get(
+                    "/reading/bookapi/bookmall/cell/change/v",
+                    params(&[
+                        ("cell_id", &state.cell_id),
+                        ("show_type", &state.show_type),
+                        ("cell_sub_id", "0"),
+                        ("tab_type", "2"),
+                        ("offset", "0"),
+                        ("limit", "20"),
+                        ("change_type", "0"),
+                        ("filter_ids", &recent),
+                        ("force_filter_ids", &recent),
+                        ("session_id", &model::s(&state.cursor, "sessionId")),
+                    ]),
+                )
+                .await?;
+            state.rows =
+                recommendation_rows(data.get("cell_view").unwrap_or(&data), &mut state.seen);
+            state.cursor = json!({"sessionId":model::s(&data,"session_id"),"done":false});
+        } else {
+            // A tab cursor counts cards, not books. has_more describes the fixed
+            // top section; bottom_unlimited keeps the recommendation feed open.
+            let offset = number(&state.cursor["offset"]);
+            let data = api
+                .get(
+                    "/reading/bookapi/bookmall/tab/v",
+                    params(&[
+                        ("tab_type", "2"),
+                        ("offset", &offset.to_string()),
+                        ("session_id", &model::s(&state.cursor, "sessionId")),
+                        (
+                            "client_fetch_unlimited_mode",
+                            &model::s(&state.cursor, "fetchMode"),
+                        ),
+                    ]),
+                )
+                .await?;
+            let tab = recommendation_tab(&data)?;
+            state.cursor = recommendation_cursor(tab, Some(offset), "3")?;
+            state.rows = recommendation_rows(
+                if url == "fanqie://home" {
+                    tab
+                } else {
+                    recommendation_cell(tab)?
+                },
+                &mut state.seen,
+            );
+        }
         ensure!(
             !state.rows.is_empty() || model::boolean(&state.cursor["done"]),
             "官方暂未返回新的推荐，请刷新或稍后重试"
@@ -502,6 +507,33 @@ async fn recommendation(
     state.created_ms = api::now();
     service.pages.lock().unwrap().insert(key, state);
     Ok(Payload::Books(books))
+}
+fn recommendation_tab(data: &Value) -> Result<&Value> {
+    data["tab_item"]
+        .as_array()
+        .and_then(|tabs| tabs.iter().find(|tab| number(&tab["tab_type"]) == 2))
+        .ok_or_else(|| anyhow!("官方暂未提供推荐频道"))
+}
+fn recommendation_cell(tab: &Value) -> Result<&Value> {
+    tab["cell_data"]
+        .as_array()
+        .and_then(|cells| {
+            cells
+                .iter()
+                .find(|cell| matches!(model::s(cell, "show_type").as_str(), "337" | "384"))
+        })
+        .ok_or_else(|| anyhow!("官方暂未提供连续推荐流"))
+}
+fn recommendation_cursor(tab: &Value, previous: Option<u64>, fetch_mode: &str) -> Result<Value> {
+    let done = !model::boolean(&tab["has_more"]) && !model::boolean(&tab["bottom_unlimited"]);
+    let next = tab.get("next_offset").map(number);
+    ensure!(
+        done || next.is_some_and(|next| previous.is_none_or(|old| next > old)),
+        "官方推荐游标未推进，请刷新重试"
+    );
+    Ok(
+        json!({"offset":next.unwrap_or_default(),"sessionId":model::s(tab,"session_id"),"done":done,"fetchMode":fetch_mode}),
+    )
 }
 fn recommendation_rows(value: &Value, seen: &mut Vec<String>) -> Vec<Value> {
     let mut known: HashSet<_> = seen.iter().cloned().collect();
@@ -520,6 +552,35 @@ fn recommendation_rows(value: &Value, seen: &mut Vec<String>) -> Vec<Value> {
 #[cfg(test)]
 mod recommendation_tests {
     use super::*;
+    #[test]
+    fn unlimited_tab_uses_card_cursor_even_when_top_section_has_no_more() {
+        let tab =
+            json!({"has_more":false,"bottom_unlimited":true,"next_offset":2,"session_id":"first"});
+        let first = recommendation_cursor(&tab, None, "2").unwrap();
+        assert_eq!(first["offset"], 2);
+        assert_eq!(first["done"], false);
+        assert_eq!(first["fetchMode"], "2");
+        let next = recommendation_cursor(
+            &json!({"has_more":false,"bottom_unlimited":true,"next_offset":4,"session_id":"next"}),
+            Some(2),
+            "3",
+        )
+        .unwrap();
+        assert_eq!(next["offset"], 4);
+        assert_eq!(next["sessionId"], "next");
+        assert_eq!(next["done"], false);
+        assert!(recommendation_cursor(&tab, Some(2), "3").is_err());
+        assert!(recommendation_cursor(&json!({"bottom_unlimited":true}), None, "2").is_err());
+        assert_eq!(
+            recommendation_cursor(
+                &json!({"has_more":false,"bottom_unlimited":false,"next_offset":4}),
+                Some(4),
+                "3"
+            )
+            .unwrap()["done"],
+            true
+        );
+    }
     #[test]
     fn feed_excludes_previous_books_and_preserves_new_row_metadata() {
         let mut seen = vec!["7000000000000000001".to_string()];
