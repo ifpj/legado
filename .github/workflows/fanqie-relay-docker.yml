@@ -49,6 +49,7 @@ jobs:
       - name: Check embedded book-source callbacks
         run: |
           node --check source/fanqie.js
+          node --check source/update-source.js
           node --check web/app.js
           node --check web/community.js
           node tests/check-source-sync.cjs

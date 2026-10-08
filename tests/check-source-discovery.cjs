@@ -14,3 +14,30 @@ context.relayOnEvent('delBookShelf',book,chapter);assert.notEqual(calls.at(-1).o
 context.relayOnEvent('addBookShelf',book,chapter);assert.equal(calls.at(-1).args.action,'add');
 assert.equal(context.relayOnEvent('clickCustomButton',book,chapter),true);assert.equal(calls.at(-1).browser[1],null);assert.match(calls.at(-1).browser[0],/bookId=123&chapterId=456/);
 console.log('Discovery source checks passed: preferences, no default extra HTTP, shelf modes, paragraph/version mapping, native browser URL.');
+
+// Run the self-contained button against an older mainJs: users should not need
+// to update their source before they can use the new update entry.
+const updateAction=fs.readFileSync(path.resolve(__dirname,'../source/update-source.js'),'utf8');
+const legacyMainJs=fs.readFileSync(path.resolve(__dirname,'../source/fanqie.js'),'utf8');
+const pages=[];
+context.java.startBrowser=(url,title)=>pages.push({url,title});
+context.java.downloadFile=()=>{throw new Error('Update must only open the web console');};
+context.java.openUrl=()=>{throw new Error('Import is initiated by the user on the web page');};
+for(const [base,embeddedToken,cachedToken] of [
+    ['http://relay.lan:122','',''],
+    ['https://books.example:8443','embedded-token','unused-cache-token'],
+    ['http://[2001:db8::1]:19670','','cache-token']
+]){
+    saved.set('fanqie.rust.service.token',cachedToken);
+    context.source.mainJs=legacyMainJs+'\nRELAY_URL='+JSON.stringify(base)+';RELAY_TOKEN='+JSON.stringify(embeddedToken)+';';
+    const before=[...saved.entries()];
+    vm.runInContext(updateAction,context);
+    const {url:address,title}=pages.at(-1),url=new URL(address);
+    assert.equal(url.origin,base);
+    assert.equal(url.pathname,'/');assert.equal(url.hash,'#connect');
+    assert.equal(url.search,'','credentials are not passed in the page URL');
+    assert.equal(title,'更新番茄书源');
+    assert.deepEqual([...saved.entries()],before,'opening the page preserves login/device/preferences state');
+}
+assert.equal(pages.length,3);
+console.log('Source update checks passed: old mainJs, host/HTTPS/IPv6, direct web import page, no file download/import, preserved state.');

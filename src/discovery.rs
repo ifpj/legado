@@ -253,6 +253,12 @@ async fn rank_navigation(api: &mut Api, g: &str) -> Result<Value> {
 fn item(title: &str, url: &str, heading: bool) -> Value {
     json!({"title":title,"url":url,"style":{"layout_flexGrow":1,"layout_flexBasisPercent":if heading {1.0}else{0.23}}})
 }
+fn update_source_item() -> Value {
+    let mut entry = item("更新书源", "", false);
+    entry["type"] = json!("button");
+    entry["action"] = json!(include_str!("../source/update-source.js"));
+    entry
+}
 pub fn category_menu(data: &Value, g: &str) -> Vec<Value> {
     let mut menu = vec![item(
         "全部小说",
@@ -297,6 +303,9 @@ pub async fn menu(api: &mut Api, preferences: &Value) -> Result<Value> {
             item("我的书架", "fanqie://shelf", false),
             item("阅读历史", "fanqie://history", false),
         ]);
+    }
+    entries.push(update_source_item());
+    if api.account.is_some() {
         let shelf = api
             .get(
                 "/reading/bookapi/bookshelf/list/v",
