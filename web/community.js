@@ -92,7 +92,7 @@ async function load(reset){
         const wrap=$('items');wrap.replaceChildren();for(const item of result.items||[])wrap.append(card(item,context));
         if(!result.items?.length)wrap.append(node('div','暂无评论','empty'));
         $('page').textContent='第 '+state.page+' 页';
-        $('status').textContent=(result.total!=null?'共 '+result.total+' 条 · ':'')+(result.items?.length||0)+' 条 · '+Math.round(performance.now()-begin)+' ms';
+        $('status').textContent=(result.total!=null?'官方总数 '+result.total+' 条 · ':'')+'本页显示 '+(result.items?.length||0)+' 条 · '+Math.round(performance.now()-begin)+' ms';
         $('raw').textContent=JSON.stringify(summary?{comments:result.raw,paragraphs:summary.raw}:result.raw,null,2);
     }catch(e){if(revision===state.revision)$('status').textContent=e.message||String(e);}
     finally{if(revision===state.revision){state.busy=false;$('refresh').disabled=false;$('first').disabled=false;$('next').disabled=!state.result?.hasMore;$('download').disabled=!state.result;}}

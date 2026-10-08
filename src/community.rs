@@ -72,6 +72,21 @@ pub fn normalize(row: &Value, chapter: bool) -> Option<Value> {
                 .join("\n");
         }
     }
+    if message.is_empty() {
+        // Community posts carry rich HTML in skeleton.data and a separate
+        // official plain-text field. Keep that text without executing the HTML.
+        message = text(common, &["pure_content"]);
+    }
+    if post.is_some() {
+        let title = text(common, &["title"]);
+        if !title.is_empty() && title != message {
+            message = if message.is_empty() {
+                title
+            } else {
+                format!("{title}\n{message}")
+            };
+        }
+    }
     let imgs = images(&body["image_data_list"])
         .into_iter()
         .chain(images(&common["image_data"]))
@@ -105,6 +120,11 @@ pub fn normalize(row: &Value, chapter: bool) -> Option<Value> {
         badges.push(format!("评分 {score}"));
     }
     let stat = c.get("stat").unwrap_or(c);
+    let service_id = match number(&common["service_id"]) {
+        0 if post.is_some() => 11,
+        0 if chapter => 4,
+        value => value,
+    };
     let reply_to = common
         .get("reply_to_user_info")
         .or_else(|| c.get("reply_to_user_info"))
@@ -123,10 +143,10 @@ pub fn normalize(row: &Value, chapter: bool) -> Option<Value> {
     Some(
         json!({"id":format!("{prefix}:{raw_id}"),"name":text(base,&["user_name","name"]),
         "avatar":safe_image(&base["user_avatar"]),"badge":badges,"images":imgs,
-        "content":{"text":message,"img":imgs.first(),"time":model::time(common.get("create_timestamp")),
-            "likeCount":number(&stat["digg_count"]),"replyCount":number(model::first(stat,&["reply_count","reply_cnt"]).unwrap_or(&Value::Null)),
+        "content":{"text":message,"img":imgs.first(),"time":model::time(model::first(common,&["create_timestamp","create_time"])),
+            "likeCount":number(model::first(stat,&["digg_count","digg_cnt"]).unwrap_or(&Value::Null)),"replyCount":number(model::first(stat,&["reply_count","reply_cnt"]).unwrap_or(&Value::Null)),
             "replyToName":text(reply_base,&["user_name","name"])},"replies":inline,
-        "replyContext":{"groupId":text(common,&["group_id"]),"serviceId":number(&common["service_id"])} }),
+        "replyContext":{"groupId":text(common,&["group_id"]),"serviceId":service_id} }),
     )
 }
 pub fn summary(data: &Value) -> Value {
@@ -469,5 +489,33 @@ mod tests {
         assert!(data["total"].is_null());
         assert_eq!(data["raw"]["common_list_info"]["total"], 0);
         assert_eq!(data["items"].as_array().unwrap().len(), 1);
+    }
+    #[test]
+    fn rich_community_posts_use_official_plain_text_and_post_metadata() {
+        let row = json!({"post_data":{"post_id":"123","content":"{\"materials\":[],\"skeleton\":{\"type\":\"html\",\"data\":\"<p>正文</p><script>unsafe()</script>\"}}",
+            "pure_content":"正文","title":"标题","create_time":1602748828,"digg_cnt":7,"reply_cnt":2,
+            "user_info":{"user_name":"读者"}}});
+        let item = normalize(&row, true).unwrap();
+        assert_eq!(item["id"], "post:123");
+        assert_eq!(item["content"]["text"], "标题\n正文");
+        assert_eq!(item["content"]["likeCount"], 7);
+        assert_eq!(item["content"]["replyCount"], 2);
+        assert!(!item["content"]["time"].as_str().unwrap().is_empty());
+        assert_eq!(item["replyContext"]["serviceId"], 11);
+    }
+    #[test]
+    fn chapter_page_keeps_both_comments_and_community_posts() {
+        let raw = json!({"item_related_count":5,"mix_data":[
+            {"comment":{"comment_id":"1","text":"一"}},
+            {"comment":{"comment_id":"2","text":"二"}},
+            {"comment":{"comment_id":"3","text":"三"}},
+            {"post_data":{"post_id":"4","content":"{\"materials\":[],\"skeleton\":{\"data\":\"<p>四</p>\",\"type\":\"html\"}}","pure_content":"四"}},
+            {"post_data":{"post_id":"5","content":"{\"materials\":[],\"skeleton\":{\"data\":\"<p>五</p>\",\"type\":\"html\"}}","pure_content":"五"}}
+        ]});
+        let data = result(raw, "mix_data", true, Value::Null, false, 1);
+        assert_eq!(data["total"], 5);
+        assert_eq!(data["items"].as_array().unwrap().len(), 5);
+        assert_eq!(data["items"][3]["id"], "post:4");
+        assert_eq!(data["items"][4]["id"], "post:5");
     }
 }

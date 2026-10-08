@@ -25,7 +25,8 @@ function find(n,text){if(n.textContent===text)return n;for(const c of n.children
 (async()=>{
     const ui=page();let task=ui.run('load(true)');
     assert.equal(ui.pending[0].args.sort,1);assert.equal('cursor' in ui.pending[0].args,false);
-    ui.pending[0].resolve(result());await task;
+    ui.pending[0].resolve({...result(),total:5});await task;
+    assert.match(ui.element('status').textContent,/官方总数 5 条 · 本页显示 1 条/);
     task=ui.element('next').onclick();assert.equal(ui.pending[1].args.page,2);assert.equal(ui.pending[1].args.cursor,'opaque');
     ui.pending[1].reject(Error('temporary failure'));await task;
     assert.equal(ui.run('state.page'),1);assert.equal(ui.element('next').disabled,false);
@@ -36,6 +37,7 @@ function find(n,text){if(n.textContent===text)return n;for(const c of n.children
     assert.equal(ui.pending[4].args.sort,3);
     ui.pending[4].resolve(result('latest','new'));await latest;
     ui.pending[3].resolve(result('stale','old'));await old;
+    assert.match(ui.element('status').textContent,/^本页显示 1 条/);
     assert.equal(ui.run('state.result.items[0].content.text'),'latest');assert.equal(ui.run('state.cursor'),'new');
     assert.equal(ui.element('refresh').disabled,false);
 
