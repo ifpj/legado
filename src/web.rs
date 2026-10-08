@@ -418,6 +418,7 @@ pub fn allowed_path(path: &str) -> bool {
             | "/reading/bookapi/directory/all_items/v"
             | "/reading/bookapi/multi-detail/v"
             | "/reading/bookapi/search/search/v"
+            | "/reading/bookapi/search/tab/v"
             | "/reading/bookapi/bookmall/homepage/v"
             | "/reading/bookapi/bookmall/cell/change/v"
             | "/reading/bookapi/bookshelf/list/v"
@@ -456,7 +457,7 @@ async fn catalog(State(service): State<Service>, headers: HeaderMap) -> Response
         {"path":"/reading/ugc/item/mix_data/get/v","name":"章节讨论（只读）","operation":"reviews","method":"POST","params":{}},
         {"path":"/novel/commentapi/reply/list/{id}/v1","name":"评论回复（只读）","operation":"review_replies","method":"POST","params":{}},
         {"path":"/reading/bookapi/bookshelf/add|delete/v","name":"云端书架增删（默认预检查）","operation":"shelf_change","method":"POST","params":{}},
-        {"path":"/reading/bookapi/search/search/v","name":"搜索","params":{"q":"烟雨楼","offset":"0"}},
+        {"path":"/reading/bookapi/search/tab/v","name":"书籍搜索（原名/别名/短名）","params":{"query":"烟雨楼","tab_type":"3","bookshelf_search_plan":"4","search_source":"1","offset":"0"}},
         {"path":"/reading/bookapi/detail/v","name":"书籍详情","params":{"book_id":"6883748331202284558"}},
         {"path":"/reading/bookapi/directory/all_items/v","name":"完整目录","params":{"book_id":"6883748331202284558","filter_copyright_page":"false"}},
         {"path":"/reading/bookapi/multi-detail/v","name":"批量详情","params":{"book_id":"6883748331202284558","book_type":"0"}},

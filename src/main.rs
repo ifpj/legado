@@ -9,6 +9,7 @@ mod network;
 mod progress;
 mod resolver;
 mod runtime;
+mod search;
 mod session;
 mod shelf;
 mod web;
@@ -721,34 +722,30 @@ async fn execute(service: &Service, api: &mut Api, call: &Call) -> Result<Payloa
                     .await?;
                 return Ok(Payload::Books(vec![model::book(&data, None)]));
             }
-            let key = page_key(api, &format!("search:{query}"));
+            let key = page_key(api, &format!("search-tab:{query}"));
             let mut state = take_page(service, &key, page);
             let cursor = state
                 .search_cursors
                 .get(&page)
                 .cloned()
-                .unwrap_or(json!({"offset":(page-1)*10,"searchId":""}));
+                .or_else(|| (page == 1).then(|| json!({"offset":0})))
+                .ok_or_else(|| anyhow!("搜索分页游标已过期，请从第一页重新搜索"))?;
             if model::boolean(&cursor["done"]) {
                 return Ok(Payload::Books(vec![]));
             }
             let data = api
                 .get(
-                    "/reading/bookapi/search/search/v",
-                    params(&[
-                        ("q", &query),
-                        ("offset", &model::s(&cursor, "offset")),
-                        ("search_id", &model::s(&cursor, "searchId")),
-                    ]),
+                    search::PATH,
+                    search::request_params(&query, &cursor, api.account.is_some()),
                 )
                 .await?;
-            state.search_cursors.insert(page+1,json!({"offset":number(&cursor["offset"])+10,"searchId":model::s(&data,"search_id"),"done":number(&data["has_more"])!=1}));
-            service.pages.lock().unwrap().insert(key, state);
+            let tab = search::book_tab(&data)?;
+            state
+                .search_cursors
+                .insert(page + 1, search::next_cursor(tab)?);
             let start = Instant::now();
-            let books = array(&data["search_result"])
-                .iter()
-                .filter(|r| model::s(r, "book_type") == "0" && model::s(r, "type") == "0")
-                .map(|r| model::book(r, None))
-                .collect();
+            let books = search::books(tab, &mut state.seen);
+            service.pages.lock().unwrap().insert(key, state);
             api.metrics.transform_us += start.elapsed().as_micros() as u64;
             Ok(Payload::Books(books))
         }

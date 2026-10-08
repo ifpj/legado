@@ -209,12 +209,28 @@ pub fn book(info: &Value, context: Option<&Value>) -> Book {
     }
     for (label, keys) in [
         ("原书名", vec!["original_book_name", "original_name"]),
-        ("别名", vec!["book_alias", "alias"]),
+        (
+            "别名",
+            vec![
+                "book_alias",
+                "alias",
+                "alias_name",
+                "book_flight_alias_name",
+            ],
+        ),
+        ("短名", vec!["book_short_name"]),
         ("主角", vec!["roles", "role"]),
         ("在读人数", vec!["read_count", "reading_count"]),
     ] {
         if let Some(v) = first(info, &keys) {
-            extra.push(format!("{label}：{}", string(v)));
+            let value = string(v);
+            if matches!(label, "原书名" | "别名" | "短名")
+                && (value == s(info, "book_name")
+                    || (label == "别名" && value == s(info, "original_book_name")))
+            {
+                continue;
+            }
+            extra.push(format!("{label}：{value}"));
         }
     }
     if let Some(c) = context {
@@ -292,6 +308,21 @@ pub fn book(info: &Value, context: Option<&Value>) -> Book {
                 .unwrap_or_else(|| info.clone()),
         ),
     }
+}
+pub fn search_book(info: &Value, cell: &Value, single_book: bool) -> Book {
+    let mut item = book(info, None);
+    // SearchBookCardProvider uses the official title highlight as its display
+    // text. It can name the matching original title or short name plus alias.
+    // A collection card's heading belongs to the collection, not each book.
+    if single_book {
+        if let Some(title) = first(&cell["search_high_light"]["title"], &["text"])
+            .or_else(|| first(cell, &["cell_name"]))
+        {
+            item.name = string(title);
+        }
+    }
+    item.variable = metadata(&json!({"book":info,"search":cell}));
+    item
 }
 pub fn book_rows(data: &Value) -> Vec<(Value, Option<Value>)> {
     fn visit(v: &Value, seen: &mut HashSet<String>, out: &mut Vec<(Value, Option<Value>)>) {
