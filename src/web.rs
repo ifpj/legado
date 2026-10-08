@@ -170,12 +170,21 @@ async fn qr(
     headers: HeaderMap,
     Query(q): Query<SourceQuery>,
 ) -> Response {
+    if service.token.is_some() {
+        return error_response(
+            StatusCode::CONFLICT,
+            "QR_IMPORT_UNAVAILABLE",
+            "服务已启用令牌，请下载 JSON 书源后导入",
+        );
+    }
     let base = match request_base(q.base.as_deref(), service.public_url.as_deref(), &headers) {
         Ok(v) => v,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "INVALID_BASE", "服务地址无效"),
     };
-    // Point at the console so users can review the instructions before importing.
-    let code = match qrcode::QrCode::new(format!("{base}/")) {
+    let mut import_url = url::Url::parse(&format!("{base}/source.json")).unwrap();
+    import_url.query_pairs_mut().append_pair("base", &base);
+    // Legado's book-source scanner imports HTTP URLs directly.
+    let code = match qrcode::QrCode::new(import_url.as_str()) {
         Ok(c) => c,
         Err(_) => {
             return error_response(

@@ -65,7 +65,7 @@ def main():
             assert ("var RELAY_URL = " + json.dumps(expected) + ";") in generated["mainJs"]
             assert expected + '"' in request("/source.js", extra_headers=headers)[2]
             assert get_json("/admin/status", headers)["service"]["publicUrl"] == expected
-            assert request("/qr.svg", extra_headers=headers)[0] == 200
+            assert request("/qr.svg", extra_headers=headers)[0] == (409 if args.token else 200)
         assert request("/source.json", extra_headers={"Host": "relay.lan/path"})[0] == 400
         assert request("/source.json", extra_headers={"X-Forwarded-Proto": "file"})[0] == 400
         source = get_json("/source.json?base=http%3A%2F%2Frelay.example%3A19670")[0]

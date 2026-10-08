@@ -9,7 +9,7 @@ function page(origin, storedBase = '') {
     if (storedBase) saved.set('relay.base', storedBase);
     const node = () => ({value: '', listeners: {}, style: {}, dataset: {},
         classList: {add() {}, remove() {}, toggle() {}},
-        append() {}, replaceChildren() {}, setAttribute() {},
+        append() {}, replaceChildren() {}, setAttribute() {}, removeAttribute(name) {delete this[name];},
         addEventListener(name, action) {this.listeners[name] = action;}});
     const element = id => {
         if (!elements.has(id)) elements.set(id, node());
@@ -35,7 +35,10 @@ function page(origin, storedBase = '') {
         assert.equal(source.origin, expected);
         assert.equal(source.pathname, '/source.json');
         assert.equal(source.searchParams.get('base'), expected);
-        assert.equal(new URL(element('qr-image').src, origin).searchParams.get('base'), expected);
+        assert.equal(element('qr-address').textContent, source.href);
+        if (!element('qr-image').hidden) {
+            assert.equal(new URL(element('qr-image').src, origin).searchParams.get('base'), expected);
+        }
         assert.equal(new URL(element('import-source').href).searchParams.get('src'), source.href);
     }
     return {element, check, status, saved};
@@ -56,6 +59,15 @@ for (const origin of ['http://relay.lan:122', 'http://1.1.1.1:8088', 'https://bo
     ui.check('http://manual.lan:8088');
     assert.equal(ui.saved.get('relay.base'), 'http://manual.lan:8088');
     assert.equal(ui.element('import-source').hidden, true);
+    assert.equal(ui.element('qr-image').hidden, true);
+    assert.equal(ui.element('qr-image').src, undefined);
+    assert.equal(ui.element('qr-address').hidden, true);
+    assert.equal(ui.element('copy-address').hidden, true);
+    assert.match(ui.element('qr-hint').textContent, /下载 JSON 书源/);
+    ui.status(origin);
+    ui.check('http://manual.lan:8088');
+    assert.equal(ui.element('qr-image').hidden, false);
+    assert.equal(ui.element('copy-address').hidden, false);
 }
 const manual = page('https://books.example', 'http://manual.lan:122');
 manual.status('https://fixed.example', false, 'https://fixed.example');
