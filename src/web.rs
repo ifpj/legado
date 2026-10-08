@@ -382,7 +382,7 @@ pub fn call_summary(call: &Call) -> String {
             model::book_id(&args["book"]).unwrap_or_default(),
             model::s(args, "scope")
         ),
-        "discovery_menu" => "实时分类与书架分组".into(),
+        "discovery_menu" => "实时官方榜单、分类与书架分组".into(),
         "raw" => model::s(args, "path"),
         "web_login" => "官方网页登录验证".into(),
         _ => String::new(),
@@ -450,7 +450,7 @@ async fn catalog(State(service): State<Service>, headers: HeaderMap) -> Response
     Json(json!({"operations":["search","detail","chapters","content","content_batch","progress_get","progress_put","explore","discovery_menu","review_summary","reviews","review_replies","shelf_change","raw","web_login"],"paths":[
         {"path":"/reading/bookapi/new_category/front/v","name":"实时男生 / 女生分类与标签","operation":"discovery_menu","params":{}},
         {"path":"/reading/bookapi/new_category/landing/v","name":"分类与字数 / 状态 / 排序筛选","operation":"explore","params":{}},
-        {"path":"/reading/bookapi/bookmall/cell/change/v1","name":"巅峰等扩展榜单","operation":"explore","params":{}},
+        {"path":"/reading/bookapi/bookmall/cell/change/v1","name":"官方榜单（名称及编号从实时导航读取）","operation":"explore","params":{}},
         {"path":"/reading/ugc/idea/list/v","name":"原生段评数量与版本","operation":"review_summary","params":{}},
         {"path":"/novel/commentapi/comment/list/{id}/v1","name":"书评与段评（只读）","operation":"reviews","method":"POST","params":{}},
         {"path":"/reading/ugc/item/mix_data/get/v","name":"章节讨论（只读）","operation":"reviews","method":"POST","params":{}},

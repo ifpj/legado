@@ -184,7 +184,10 @@ async fn explore(
     ) {
         return recommendation(service, api, url, page).await;
     }
-    if url.starts_with("fanqie://category?") || url.starts_with("fanqie://ranking?") {
+    if url.starts_with("fanqie://ranking?") {
+        return ranking(service, api, url, page).await;
+    }
+    if url.starts_with("fanqie://category?") {
         return Ok(Payload::Books(
             discovery::list(api, url, preferences, page).await?,
         ));
@@ -385,6 +388,37 @@ async fn explore(
     state.created_ms = api::now();
     service.pages.lock().unwrap().insert(key, state);
     Ok(result)
+}
+async fn ranking(service: &Service, api: &mut Api, url: &str, page: usize) -> Result<Payload> {
+    let key = page_key(api, url);
+    let lock = service.page_locks.get("ranking", &key);
+    let _guard = tokio::time::timeout(Duration::from_secs(30), lock.lock())
+        .await
+        .map_err(|_| anyhow!("官方榜单加载排队超时，请稍后重试"))?;
+    let mut state = take_page(service, &key, page);
+    ensure!(
+        page == 1 || state.cursor.get("offset").is_some(),
+        "官方榜单翻页会话已过期，请刷新重试"
+    );
+    if model::boolean(&state.cursor["done"]) {
+        return Ok(Payload::Books(vec![]));
+    }
+    let data = discovery::rank_data(api, url, &state.cursor).await?;
+    state.cursor = discovery::rank_cursor(&data, &state.cursor)?;
+    let start = Instant::now();
+    let rows = recommendation_rows(data.get("cell_view").unwrap_or(&data), &mut state.seen);
+    ensure!(
+        !rows.is_empty() || model::boolean(&state.cursor["done"]),
+        "官方榜单暂未返回新的书籍，请刷新重试"
+    );
+    let books = rows
+        .iter()
+        .map(|r| model::book(&r["info"], r.get("context").filter(|v| !v.is_null())))
+        .collect();
+    api.metrics.transform_us += start.elapsed().as_micros() as u64;
+    state.created_ms = api::now();
+    service.pages.lock().unwrap().insert(key, state);
+    Ok(Payload::Books(books))
 }
 /// Keep only the unconsumed first-screen rows and pagination identity. Every
 /// subsequent feed/exchange request reads live data from the official API.
@@ -867,7 +901,7 @@ fn validate(call: &Call) -> Option<Response> {
                     discovery::category_params(&a, &args["preferences"], 1).map(|_| ())
                 })
             } else if url.starts_with("fanqie://ranking?") {
-                discovery::parse_url(&url).and_then(|a| discovery::rank_params(&a, 1).map(|_| ()))
+                discovery::parse_url(&url).and_then(|a| discovery::rank_params(&a, 0).map(|_| ()))
             } else {
                 Ok(())
             };

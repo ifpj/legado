@@ -8,7 +8,7 @@
   "enabledCookieJar": false,
   "eventListener": true,
   "loginUi": "{\"version\":2}",
-  "bookSourceComment": "Rust 中转；首页与猜你喜欢连续下滑，高分栏目换批追加；实时分类与筛选、分组书架、书评和段评、插图与注释；原版下载模式，每批 30 章；网页登录后同步章节；书架联动默认关闭。Rust 全线固定使用阿里 DoH。",
+  "bookSourceComment": "Rust 中转；首页与猜你喜欢连续下滑，高分栏目换批追加；实时官方榜单、分类与筛选、分组书架、书评和段评、插图与注释；原版下载模式，每批 30 章；网页登录后同步章节；书架联动默认关闭。Rust 全线固定使用阿里 DoH。",
   "exploreUrl": "@js:eval(String(source.mainJs));relayExploreMenu();",
   "ruleContent": {
     "maxBatchSize": 30,
