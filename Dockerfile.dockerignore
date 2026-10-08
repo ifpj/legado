@@ -1,0 +1,12 @@
+**
+!LICENSE
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**
+!source/
+!source/**
+!web/
+!web/**
+!tests/
+!tests/signature-vectors.json

@@ -1,0 +1,39 @@
+[
+  {
+    "query": "device_id=1234567890123456789&version_name=7.3.9.32&aid=1967",
+    "body": null,
+    "now": 1791302400000,
+    "random": 305419896,
+    "ladonRandom": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "expected": {
+      "x-argus": "8oG1GzXRCYFxRHbO9/LI7M+nXbi8pQS89TwD6CpCJChU0AVEh3CIe2jMYzfeEPPf8YgmO7T7hcERGY/pM4cHbzbzSuRmwcdj3Z5f/5FNBjNmBGJF5iHYGMBLMkGYtsRWmMQllCEBR4tGnzmJZrqkq6fgX8DPrJHpSfLmYgUvsviR4B34RplOtlDN7QfGBCuvpH5TdAcKyeFtUEcDpV61gNhKUsYMXXpOMzQ/23F57sYv1rpVAnFh9cRQolXaMya3SmTnSMccu/CI7FFxX+ARYfmf",
+      "x-ladon": "AQIDBEgKhI10ply8SWm5cfVcpEWbuge4sBwUJsyHVivhtMsH",
+      "x-khronos": "1791302400",
+      "x-ss-req-ticket": "1791302400000"
+    }
+  },
+  {
+    "query": "book_id=6883748331202284558&device_id=998877665544332211&version_name=7.3.9.32",
+    "body": "{\"content\":\"test\",\"keyver\":1}",
+    "now": 1791302400123,
+    "random": 4275878552,
+    "ladonRandom": [
+      242,
+      129,
+      97,
+      111
+    ],
+    "expected": {
+      "x-argus": "8oEOJVdob+G/gGROki4+AIxcKSzoGhoNl5ZSQYs+qF4aneThqFMykLJkwN4bKbaajvugS9dXMQDOfq6dWt6fQE4T7Lkoo9lo3V5wdxDGN6dYNxuqFU/A18keKsZ8kdRCrDPN8qv+Nz2rSPj6StbQbiUzYp3/htQVFy5onIjjhds1FBMtQWSpWUDRzVUAEdIt1JV2jsCxVIGeDlUgebainmv83IrtpuShwq/sz3eLFm1dBq4dvoTUHyk7/iocbIc4xK8l/LDJpt9JYOxMtsqYAHJl",
+      "x-ladon": "8oFhb5klzsMDZPOXnrCaan3Py8oV5XRH3P7mLefh1RuRbDQQ",
+      "x-khronos": "1791302400",
+      "x-ss-req-ticket": "1791302400123",
+      "X-SS-STUB": "ce123a859f866ae562614e565718ea1b"
+    }
+  }
+]

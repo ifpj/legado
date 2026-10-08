@@ -1,0 +1,18 @@
+services:
+  fanqie-relay:
+    image: ghcr.io/ifpj/fanqie-relay:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${FANQIE_RELAY_PORT:-19670}:19670"
+    environment:
+      FANQIE_RELAY_PUBLIC_URL: "${FANQIE_RELAY_PUBLIC_URL:?Copy .env.example to .env and set the host URL}"
+      FANQIE_RELAY_TOKEN: "${FANQIE_RELAY_TOKEN:-}"
+      FANQIE_RELAY_CONCURRENCY: "${FANQIE_RELAY_CONCURRENCY:-8}"
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

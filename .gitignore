@@ -1,0 +1,25 @@
+# Release files only. Local experiments, device probes, reports and artifacts
+# stay on this machine; compiled assets are under source/ and web/.
+/*
+!/.gitignore
+!/.gitattributes
+!/.github/
+!/LICENSE
+!/Cargo.toml
+!/Cargo.lock
+!/README.md
+!/Dockerfile
+!/Dockerfile.dockerignore
+!/compose.yaml
+!/.env.example
+!/run-windows.ps1
+!/src/
+!/source/
+!/web/
+!/tests/
+/tests/*
+!/tests/signature-vectors.json
+!/tests/check-source-sync.cjs
+!/tests/check-source-discovery.cjs
+!/tests/smoke-container.py
+**/__pycache__/

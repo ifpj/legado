@@ -1,0 +1,37 @@
+[package]
+name = "fanqie-relay"
+version = "0.4.4"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Rust relay and web console for Legado's Fanqie source"
+
+[dependencies]
+aes = "0.8.4"
+anyhow = "1"
+axum = "0.8.9"
+base64 = "0.22.1"
+cbc = { version = "0.1.2", features = ["alloc", "block-padding"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+flate2 = "1"
+hex = "0.4"
+md5 = "0.7"
+rand = "0.8"
+regex = "1"
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "http2"] }
+scraper = "0.25"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+sha2 = "0.10"
+sm3 = "0.4"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync", "io-util"] }
+tower-http = { version = "0.6", features = ["compression-gzip"] }
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
