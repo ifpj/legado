@@ -49,6 +49,9 @@ def main():
             assert service["arch"] == {"amd64": "x86_64", "arm64": "aarch64"}[args.arch]
         assert service["memory"]["residentBytes"] > 0
         assert not service["responseCache"]
+        assert service["publicUrl"] == args.base
+        assert service["configuredPublicUrl"] is None
+        assert get_json("/source.json")[0]["bookSourceUrl"] == args.base + "/fanqie"
         # External host/port differ from the internal listener; exports must follow each request.
         for headers, expected in [
             ({"Host": "relay.lan:122"}, "http://relay.lan:122"),

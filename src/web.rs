@@ -300,7 +300,7 @@ async fn status(State(service): State<Service>, headers: HeaderMap) -> Response 
         Ok(v) => v,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "INVALID_BASE", "服务地址无效"),
     };
-    value["service"] = json!({"version":env!("CARGO_PKG_VERSION"),"platform":std::env::consts::OS,"arch":std::env::consts::ARCH,"listen":service.listen,"publicUrl":public_url,"responseCache":false,"tokenEnabled":service.token.is_some(),"concurrency":service.max_concurrency,"contentConcurrencyPerDevice":1,"contentBatchSize":30,"batchIntervalMs":service.batch_interval_ms,"contentQueueTimeoutMs":45000,"availableSlots":service.concurrency.available_permits(),"gzip":true,"memory":crate::runtime::memory()});
+    value["service"] = json!({"version":env!("CARGO_PKG_VERSION"),"platform":std::env::consts::OS,"arch":std::env::consts::ARCH,"listen":service.listen,"publicUrl":public_url,"configuredPublicUrl":service.public_url,"responseCache":false,"tokenEnabled":service.token.is_some(),"concurrency":service.max_concurrency,"contentConcurrencyPerDevice":1,"contentBatchSize":30,"batchIntervalMs":service.batch_interval_ms,"contentQueueTimeoutMs":45000,"availableSlots":service.concurrency.available_permits(),"gzip":true,"memory":crate::runtime::memory()});
     value["service"]["network"] = service.network.status();
     value["tips"] = json!([
         {"level":"info","title":"每次刷新都取得最新数据","text":"实时请求官方接口，连接池与设备密钥复用不会缓存书籍内容。"},

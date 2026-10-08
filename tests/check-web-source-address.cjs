@@ -23,9 +23,9 @@ function page(origin, storedBase = '') {
         sessionStorage: {getItem: key => saved.get(key), setItem: (key, value) => saved.set(key, value)},
         fetch: () => new Promise(() => {}), setInterval() {}, setTimeout() {}, clearTimeout() {}});
     vm.runInContext(code, context);
-    function status(publicUrl, tokenEnabled = false) {
+    function status(publicUrl, tokenEnabled = false, configuredPublicUrl = null) {
         context.snapshot = {successRate: 100, requests: [], connections: [], service: {
-            publicUrl, tokenEnabled, version: 'test', platform: 'linux', arch: 'x86_64'}};
+            publicUrl, configuredPublicUrl, tokenEnabled, version: 'test', platform: 'linux', arch: 'x86_64'}};
         vm.runInContext(`renderTrend=renderOperations=renderRequests=renderAllRequests=renderConnections=()=>{};
             runtimeRows=()=>[];state.data=snapshot;renderStatus();`, context);
     }
@@ -46,7 +46,9 @@ for (const origin of ['http://relay.lan:122', 'http://1.1.1.1:8088', 'https://bo
     ui.check(origin); // Import is usable before the status request or token entry completes.
     ui.status(origin);
     ui.check(origin);
-    ui.status('https://fixed.example');
+    ui.status('http://container:19670');
+    ui.check(origin); // Browser HTTPS remains correct even without proxy headers.
+    ui.status('https://fixed.example', false, 'https://fixed.example');
     ui.check('https://fixed.example');
     ui.element('public-base').value = 'http://manual.lan:8088/';
     ui.element('apply-address').listeners.click();
@@ -56,6 +58,6 @@ for (const origin of ['http://relay.lan:122', 'http://1.1.1.1:8088', 'https://bo
     assert.equal(ui.element('import-source').hidden, true);
 }
 const manual = page('https://books.example', 'http://manual.lan:122');
-manual.status('https://fixed.example');
+manual.status('https://fixed.example', false, 'https://fixed.example');
 manual.check('http://manual.lan:122');
 console.log('Web source address checks passed: host/port/HTTPS/IPv6, initial import, configured/manual override, token.');

@@ -75,11 +75,11 @@ jobs:
           trap 'docker logs relay-smoke 2>/dev/null || true; docker rm -f relay-smoke >/dev/null 2>&1 || true' EXIT
           for token in "" "ci-test-token"; do
             docker run --detach --name relay-smoke --read-only --cap-drop ALL \
-              --security-opt no-new-privileges --publish 127.0.0.1:19670:19670 \
+              --security-opt no-new-privileges --publish 127.0.0.1:19671:19670 \
               --env FANQIE_RELAY_TOKEN="$token" fanqie-relay:test
             curl --fail --silent --show-error --retry 20 --retry-connrefused --retry-delay 1 \
-              http://127.0.0.1:19670/health
-            python3 tests/smoke-container.py --arch "$ARCH" --token "$token"
+              http://127.0.0.1:19671/health
+            python3 tests/smoke-container.py --base http://127.0.0.1:19671 --arch "$ARCH" --token "$token"
             test "$(docker inspect --format '{{.Config.User}}' relay-smoke)" != 0
             docker stop --time 10 relay-smoke
             test "$(docker inspect --format '{{.State.ExitCode}}' relay-smoke)" = 0
