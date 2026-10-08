@@ -93,10 +93,13 @@ pub fn normalize(row: &Value, chapter: bool) -> Option<Value> {
         .chain(images(&body["images"]))
         .chain(images(&common["image_url"]))
         .collect::<Vec<_>>();
-    if message.is_empty() && imgs.is_empty() {
+    let raw_id = text(c, &["comment_id", "post_id", "reply_id", "id"]);
+    let content_unavailable = message.is_empty() && imgs.is_empty();
+    // The upstream sometimes keeps a real comment's identity and statistics
+    // while omitting its body. Preserve the row instead of silently losing it.
+    if content_unavailable && !raw_id.parse::<u64>().is_ok_and(|id| id > 0) {
         return None;
     }
-    let raw_id = text(c, &["comment_id", "post_id", "reply_id", "id"]);
     let prefix = if post.is_some() {
         "post"
     } else if chapter {
@@ -143,7 +146,7 @@ pub fn normalize(row: &Value, chapter: bool) -> Option<Value> {
     Some(
         json!({"id":format!("{prefix}:{raw_id}"),"name":text(base,&["user_name","name"]),
         "avatar":safe_image(&base["user_avatar"]),"badge":badges,"images":imgs,
-        "content":{"text":message,"img":imgs.first(),"time":model::time(model::first(common,&["create_timestamp","create_time"])),
+        "content":{"text":message,"unavailable":content_unavailable,"img":imgs.first(),"time":model::time(model::first(common,&["create_timestamp","create_time"])),
             "likeCount":number(model::first(stat,&["digg_count","digg_cnt"]).unwrap_or(&Value::Null)),"replyCount":number(model::first(stat,&["reply_count","reply_cnt"]).unwrap_or(&Value::Null)),
             "replyToName":text(reply_base,&["user_name","name"])},"replies":inline,
         "replyContext":{"groupId":text(common,&["group_id"]),"serviceId":service_id} }),
@@ -517,5 +520,29 @@ mod tests {
         assert_eq!(data["items"].as_array().unwrap().len(), 5);
         assert_eq!(data["items"][3]["id"], "post:4");
         assert_eq!(data["items"][4]["id"], "post:5");
+    }
+    #[test]
+    fn comments_with_an_omitted_body_keep_identity_statistics_and_replies() {
+        let row = json!({"comment":{"comment_id":"123","common":{"content":{"text":"","image_data_list":{}},
+            "comment_type":-514,"status":1,"user_info":{"base_info":{"user_name":"读者"}}},
+            "stat":{"digg_count":12,"reply_count":3}}});
+        let item = normalize(&row, false).unwrap();
+        assert_eq!(item["id"], "comment:123");
+        assert_eq!(item["name"], "读者");
+        assert_eq!(item["content"]["text"], "");
+        assert_eq!(item["content"]["unavailable"], true);
+        assert_eq!(item["content"]["replyCount"], 3);
+        assert_eq!(item["content"]["likeCount"], 12);
+        assert!(normalize(&json!({"data_type":99}), false).is_none());
+        let page = result(
+            json!({"common_list_info":{"total":1},"data_list":[row]}),
+            "data_list",
+            false,
+            Value::Null,
+            false,
+            1,
+        );
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["total"], 1);
     }
 }

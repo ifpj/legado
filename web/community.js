@@ -33,7 +33,7 @@ function card(item,context,reply=false){
     const a=node('article',undefined,reply?'reply':''),head=node('div',undefined,'identity'),avatar=image(item.avatar,'avatar');
     if(avatar)head.append(avatar);head.append(node('span',item.name||'读者'));
     for(const badge of item.badge||[])head.append(node('span',badge,'badge'));a.append(head);
-    const c=item.content||{};a.append(node('div',c.text||'', 'body'));
+    const c=item.content||{};a.append(node('div',c.unavailable?'评论内容暂不可见':(c.text||''),c.unavailable?'body muted':'body'));
     for(const src of item.images||[]){const img=image(src,'picture');if(img)a.append(img);}
     const meta=node('div',undefined,'meta');meta.append(node('span',c.time||''),node('span','赞 '+(c.likeCount||0)),node('span','回复 '+(c.replyCount||0)));
     if(c.replyToName)meta.append(node('span','回复 '+c.replyToName));

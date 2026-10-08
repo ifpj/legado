@@ -84,5 +84,10 @@ function find(n,text){if(n.textContent===text)return n;for(const c of n.children
     assert.equal(data.items[0].content.text,'native');
     assert.match(scripts[0],/^var sourceApi=source;eval\(String\(source.mainJs\)\);relayCall\("reviews",/);
     assert.match(scripts[0],/"sort":3/);
+    const hidden=native.run('card({id:"comment:123",name:"读者",images:[],content:{text:"",unavailable:true,replyCount:2}},args())');
+    assert.ok(find(hidden,'评论内容暂不可见'));
+    assert.ok(find(hidden,'查看回复'),'Unavailable bodies must not hide their available replies');
+    const picture=native.run('card({id:"comment:456",images:[],content:{text:"",unavailable:false}},args())');
+    assert.equal(find(picture,'评论内容暂不可见'),undefined);
     console.log('Community checks passed: official sorts, request races, page retries, reply context/cursors, chapter availability and paragraph versions.');
 })().catch(e=>{console.error(e);process.exitCode=1;});
