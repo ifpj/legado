@@ -22,5 +22,6 @@
 !/tests/check-source-sync.cjs
 !/tests/check-source-discovery.cjs
 !/tests/check-web-source-address.cjs
+!/tests/check-community.cjs
 !/tests/smoke-container.py
 **/__pycache__/

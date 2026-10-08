@@ -13,6 +13,7 @@ context.getReviewDetail(chapter,book,-1,'{"paraIndex":0,"version":"7"}',2);asser
 context.relayOnEvent('delBookShelf',book,chapter);assert.notEqual(calls.at(-1).operation,'shelf_change');
 context.relayOnEvent('addBookShelf',book,chapter);assert.equal(calls.at(-1).args.action,'add');
 assert.equal(context.relayOnEvent('clickCustomButton',book,chapter),true);assert.equal(calls.at(-1).browser[1],null);assert.match(calls.at(-1).browser[0],/bookId=123&chapterId=456/);
+assert.equal(calls.at(-1).browser[2],'window.fanqieRun=run;','BottomWebViewDialog only injects its run bridge when preloadJs is supplied');
 console.log('Discovery source checks passed: preferences, no default extra HTTP, shelf modes, paragraph/version mapping, native browser URL.');
 
 // Run the self-contained button against an older mainJs: users should not need

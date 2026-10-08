@@ -71,7 +71,7 @@ function relayOnEvent(event,book,chapter,result){
     if(event==='clickCustomButton'){
         var id=String(book.bookUrl).replace(/.*\/page\//,'');
         var cid=chapter?String(chapter.url).replace(/.*\/reader\//,''):'';
-        java.showBrowser(RELAY_URL+'/community?bookId='+encodeURIComponent(id)+'&chapterId='+encodeURIComponent(cid)+'&title='+encodeURIComponent(String(book.name||'')),null,null,JSON.stringify({title:'番茄书评与讨论'}));return true;
+        java.showBrowser(RELAY_URL+'/community?bookId='+encodeURIComponent(id)+'&chapterId='+encodeURIComponent(cid)+'&title='+encodeURIComponent(String(book.name||'')),null,'window.fanqieRun=run;',JSON.stringify({title:'番茄书评与讨论'}));return true;
     }
     if(event==='clickBookLabel'&&result&&!/^(评分|书架分组|置顶|完结|连载|[0-9])/.test(String(result))){java.searchBook(String(result),String(source.bookSourceName)+'::'+String(source.bookSourceUrl));return true;}
     if(event==='addBookShelf'||event==='delBookShelf'){

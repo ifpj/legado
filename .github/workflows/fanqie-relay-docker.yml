@@ -55,6 +55,7 @@ jobs:
           node tests/check-source-sync.cjs
           node tests/check-source-discovery.cjs
           node tests/check-web-source-address.cjs
+          node tests/check-community.cjs
       - name: Image name
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fanqie-relay" >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1

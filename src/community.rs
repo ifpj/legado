@@ -41,8 +41,10 @@ fn images(v: &Value) -> Vec<String> {
     rows.into_iter().flatten().filter_map(safe_image).collect()
 }
 pub fn normalize(row: &Value, chapter: bool) -> Option<Value> {
-    let post = row.get("post_data");
-    let c = post.or_else(|| row.get("comment")).unwrap_or(row);
+    let post = row.get("post_data").filter(|v| v.is_object());
+    let c = post
+        .or_else(|| row.get("comment").filter(|v| v.is_object()))
+        .unwrap_or(row);
     let common = c.get("common").or_else(|| c.get("Common")).unwrap_or(c);
     let user = common
         .get("user_info")
@@ -74,6 +76,7 @@ pub fn normalize(row: &Value, chapter: bool) -> Option<Value> {
         .into_iter()
         .chain(images(&common["image_data"]))
         .chain(images(&body["images"]))
+        .chain(images(&common["image_url"]))
         .collect::<Vec<_>>();
     if message.is_empty() && imgs.is_empty() {
         return None;
@@ -122,7 +125,8 @@ pub fn normalize(row: &Value, chapter: bool) -> Option<Value> {
         "avatar":safe_image(&base["user_avatar"]),"badge":badges,"images":imgs,
         "content":{"text":message,"img":imgs.first(),"time":model::time(common.get("create_timestamp")),
             "likeCount":number(&stat["digg_count"]),"replyCount":number(model::first(stat,&["reply_count","reply_cnt"]).unwrap_or(&Value::Null)),
-            "replyToName":text(reply_base,&["user_name","name"])},"replies":inline}),
+            "replyToName":text(reply_base,&["user_name","name"])},"replies":inline,
+        "replyContext":{"groupId":text(common,&["group_id"]),"serviceId":number(&common["service_id"])} }),
     )
 }
 pub fn summary(data: &Value) -> Value {
@@ -192,9 +196,34 @@ fn result(
         .flatten()
         .filter_map(|r| normalize(r, chapter))
         .collect::<Vec<_>>();
+    let total = raw
+        .get("item_related_count")
+        .unwrap_or(&raw["common_list_info"]["total"]);
+    let total = if !items.is_empty() && number(total) == 0 {
+        Value::Null
+    } else {
+        total.clone()
+    };
     json!({"items":items,"cursor":cursor,"hasMore":has_more,
         "nextPageUrl":if has_more{format!("fanqie://reviews?page={}",page+1)}else{String::new()},
-        "total":raw.get("item_related_count").cloned().unwrap_or(raw["common_list_info"]["total"].clone()),"raw":raw})
+        "total":total,"raw":raw})
+}
+fn initial_offset() -> Value {
+    json!({"book_next_offset":0,"comment_next_offset":0,"post_next_offset":0,"self_offset":0,"topic_next_offset":0})
+}
+fn chapter_body(book: &str, chapter: &str, cursor: &Value) -> Value {
+    json!({"book_id":book,"item_id":chapter,"count":20,
+        "forum_id":cursor["forumId"],"include_other_item_data":false,
+        "offset":cursor.get("offset").cloned().unwrap_or_else(initial_offset),
+        "query_type":cursor.get("queryType").cloned().unwrap_or(json!(0)),
+        "should_not_impr":true,"source_type":51})
+}
+fn offset_cursor(raw: &Value) -> Value {
+    raw.get("next_offset").cloned().unwrap_or(Value::Null)
+}
+fn has_more(raw: &Value) -> bool {
+    // A full page is not proof of another page; the API owns this decision.
+    model::boolean(&raw["has_more"])
 }
 pub async fn list(api: &mut Api, args: &Value, cursor: Value, page: usize) -> Result<Value> {
     let book = model::book_id(&args["book"])?;
@@ -205,15 +234,38 @@ pub async fn list(api: &mut Api, args: &Value, cursor: Value, page: usize) -> Re
     );
     if scope == "chapter" {
         let chapter = crate::api::chapter_id(&args["chapter"])?;
-        let offset = if cursor.is_object() {
+        let cursor = if cursor["forumId"].is_string() {
             cursor
         } else {
-            json!({"book_next_offset":0,"comment_next_offset":0,"post_next_offset":(page-1)*20,"self_offset":0,"topic_next_offset":0})
+            // The APK's chapter-end preflight obtains the forum ID before its
+            // ChapterEndMixed list request (ts6.j0). An empty ID causes SYSTEM_ERROR.
+            let preflight = api
+                .api(
+                    "/reading/ugc/item/mix_data/get/v",
+                    vec![],
+                    Some(json!({
+                        "book_id":book,"item_id":chapter,"source_type":38,"count":0,
+                        "include_other_item_data":false,"should_not_impr":false
+                    })),
+                )
+                .await?;
+            let forum = text(&preflight["forum_data"], &["forum_id"]);
+            ensure!(
+                !forum.is_empty(),
+                "官方接口未返回本书社区 ID，无法读取章节讨论"
+            );
+            json!({"forumId":forum,"offset":initial_offset(),"queryType":0})
         };
-        let raw=api.api("/reading/ugc/item/mix_data/get/v",vec![],Some(json!({"book_id":book,"item_id":chapter,
-            "count":20,"forum_id":"","include_other_item_data":false,"offset":offset,"query_type":1,"should_not_impr":true,"source_type":51}))).await?;
-        let next = raw["next_offset"].clone();
-        let more = model::boolean(&raw["has_more"]);
+        let raw = api
+            .api(
+                "/reading/ugc/item/mix_data/get/v",
+                vec![],
+                Some(chapter_body(&book, &chapter, &cursor)),
+            )
+            .await?;
+        let next = json!({"forumId":cursor["forumId"],"offset":raw["next_offset"],
+            "queryType":raw.get("next_page_type").cloned().unwrap_or(json!(0))});
+        let more = has_more(&raw);
         return Ok(result(raw, "mix_data", true, next, more, page));
     }
     let group = if scope == "book" {
@@ -222,7 +274,7 @@ pub async fn list(api: &mut Api, args: &Value, cursor: Value, page: usize) -> Re
         crate::api::chapter_id(&args["chapter"])?
     };
     let sort = args.get("sort").map(number).unwrap_or(1);
-    ensure!(matches!(sort, 0 | 1 | 3), "评论排序无效");
+    ensure!(matches!(sort, 1 | 3), "评论排序请选择热门或最新");
     let version = text(args, &["version"]);
     let version = if version.is_empty() { "1" } else { &version };
     let raw = api
@@ -258,7 +310,14 @@ pub async fn replies(api: &mut Api, args: &Value, cursor: Value, page: usize) ->
         let mut p = params(&[
             ("book_id", &book),
             ("forum_book_id", &book),
-            ("offset", &((page - 1) * 20).to_string()),
+            (
+                "offset",
+                &if cursor.is_null() {
+                    "0".into()
+                } else {
+                    model::string(&cursor)
+                },
+            ),
             ("count", "20"),
         ]);
         p.push((
@@ -270,15 +329,40 @@ pub async fn replies(api: &mut Api, args: &Value, cursor: Value, page: usize) ->
             .into(),
             id.into(),
         ));
+        if kind == "chapter" {
+            let group = crate::api::chapter_id(&args["chapter"])?;
+            p.extend(params(&[
+                ("group_id", &group),
+                (
+                    "service_id",
+                    &args["replyContext"]
+                        .get("serviceId")
+                        .map(model::string)
+                        .unwrap_or("4".into()),
+                ),
+                ("source_page", "item"),
+            ]));
+        } else {
+            p.extend(params(&[
+                ("sort", "1"),
+                (
+                    "service_id",
+                    &args["replyContext"]
+                        .get("serviceId")
+                        .map(model::string)
+                        .unwrap_or("11".into()),
+                ),
+            ]));
+        }
         let raw = api.get(path, p).await?;
         let rows = if kind == "post" {
             "comment"
         } else {
             "reply_list"
         };
-        let more =
-            model::boolean(&raw["has_more"]) || raw[rows].as_array().is_some_and(|a| a.len() == 20);
-        return Ok(result(raw, rows, false, json!(page * 20), more, page));
+        let more = has_more(&raw);
+        let next = offset_cursor(&raw);
+        return Ok(result(raw, rows, false, next, more, page));
     }
     ensure!(kind == "comment", "评论类型无效");
     let scope = text(args, &["scope"]);
@@ -287,11 +371,21 @@ pub async fn replies(api: &mut Api, args: &Value, cursor: Value, page: usize) ->
     } else {
         crate::api::chapter_id(&args["chapter"])?
     };
-    let raw=api.api(&format!("/novel/commentapi/reply/list/{id}/v1"),vec![],Some(json!({
+    let mut body = json!({
         "business_param":{"book_id":book,"fold_type":1,"item_count":0,"max_item_count":0,"need_count":true,"para_index":number(&args["paraIndex"]),"read_item_count":0,"req_type":0},
         "comment_id":id,"comment_source":502,"comment_type":if scope=="book"{2}else{1},"count":20,
         "group_id":group,"group_type":if scope=="book"{1}else{15},
-        "cursor":if cursor.is_null(){"0".to_string()}else{model::string(&cursor)}}))).await?;
+        "cursor":if cursor.is_null(){"0".to_string()}else{model::string(&cursor)}});
+    if scope == "paragraph" {
+        body["business_param"]["item_version"] = args.get("version").cloned().unwrap_or(json!("1"));
+    }
+    let raw = api
+        .api(
+            &format!("/novel/commentapi/reply/list/{id}/v1"),
+            vec![],
+            Some(body),
+        )
+        .await?;
     let next = raw["common_list_info"]["cursor"].clone();
     let more = model::boolean(&raw["common_list_info"]["has_more"]);
     Ok(result(raw, "reply_list", false, next, more, page))
@@ -343,5 +437,37 @@ mod tests {
         );
         assert_eq!(b["cursor"], "{\"session_id\":\"x\",\"offset\":20}");
         assert_eq!(b["group_type"], 1);
+    }
+    #[test]
+    fn chapter_request_keeps_forum_and_all_upstream_offsets_and_fold_state() {
+        let cursor = json!({"forumId":"123","offset":{"post_next_offset":17,"comment_next_offset":9,"topic_next_offset":2,"self_offset":4,"book_next_offset":1},"queryType":2});
+        let body = chapter_body("456", "789", &cursor);
+        assert_eq!(body["forum_id"], "123");
+        assert_eq!(body["offset"], cursor["offset"]);
+        assert_eq!(body["query_type"], 2);
+        assert_eq!(body["source_type"], 51);
+    }
+    #[test]
+    fn replies_obey_server_end_and_exact_next_offset() {
+        let raw = json!({"reply_list":vec![json!({});20],"has_more":false,"next_offset":27});
+        assert!(!has_more(&raw));
+        assert_eq!(offset_cursor(&raw), 27);
+    }
+    #[test]
+    fn chapter_comments_with_null_post_keep_identity_and_reply_context() {
+        let row = json!({"post_data":null,"comment":{"comment_id":"123","group_id":"456","service_id":4,"text":"本章讨论","image_url":["https://example.com/image.jpg"],"user_info":{"user_name":"读者"},"reply_count":2}});
+        let item = normalize(&row, true).unwrap();
+        assert_eq!(item["id"], "chapter:123");
+        assert_eq!(item["name"], "读者");
+        assert_eq!(item["replyContext"]["serviceId"], 4);
+        assert_eq!(item["images"][0], "https://example.com/image.jpg");
+    }
+    #[test]
+    fn unavailable_sort_total_is_not_reported_as_zero_comments() {
+        let raw = json!({"data_list":[{"comment":{"comment_id":"123","text":"comment"}}],"common_list_info":{"total":0,"has_more":true}});
+        let data = result(raw, "data_list", false, json!("opaque"), true, 1);
+        assert!(data["total"].is_null());
+        assert_eq!(data["raw"]["common_list_info"]["total"], 0);
+        assert_eq!(data["items"].as_array().unwrap().len(), 1);
     }
 }

@@ -779,6 +779,7 @@ async fn execute(service: &Service, api: &mut Api, call: &Call) -> Result<Payloa
             let mut state = take_page(service, &key, page);
             let cursor = args
                 .get("cursor")
+                .filter(|v| !v.is_null())
                 .cloned()
                 .or_else(|| state.search_cursors.get(&page).cloned())
                 .unwrap_or(Value::Null);
@@ -1004,6 +1005,34 @@ fn validate(call: &Call) -> Option<Response> {
                     "INVALID_SCOPE",
                     "评论类型无效",
                 ));
+            }
+            if call.operation == "reviews"
+                && model::s(args, "scope") != "chapter"
+                && args
+                    .get("sort")
+                    .is_some_and(|v| !matches!(number(v), 1 | 3))
+            {
+                return Some(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_SORT",
+                    "评论排序请选择热门或最新",
+                ));
+            }
+            if call.operation == "review_replies" {
+                let key = model::s(args, "reviewId");
+                let (kind, id) = key.split_once(':').unwrap_or(("comment", &key));
+                if !matches!(kind, "comment" | "chapter" | "post")
+                    || id.len() > 20
+                    || id.is_empty()
+                    || !id.bytes().all(|c| c.is_ascii_digit())
+                    || id.parse::<u64>().ok().is_none_or(|n| n == 0)
+                {
+                    return Some(error_response(
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_REVIEW",
+                        "评论 ID 无效",
+                    ));
+                }
             }
         }
         "raw"
