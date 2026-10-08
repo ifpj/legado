@@ -401,6 +401,16 @@ impl Api {
                 .with_context(|| format!("番茄接口未返回 JSON：{path}"))?;
             model::protect_ids(&mut response);
             self.metrics.parse_us += start.elapsed().as_micros() as u64;
+            // Category reads sometimes return SERVICE_ERROR even though the
+            // unchanged request succeeds immediately afterwards. Retry once;
+            // invalid parameters and all other business errors still fail.
+            if retry == 0
+                && payload.is_none()
+                && path == "/reading/bookapi/new_category/landing/v"
+                && number(&response["code"]) == 101116
+            {
+                continue;
+            }
             ensure!(
                 response
                     .get("code")

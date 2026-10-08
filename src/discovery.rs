@@ -83,7 +83,7 @@ pub fn category_params(
         ensure!(sub.parse::<u64>().is_ok(), "分类标签无效");
         selected.push_str(&format!(",cate_{sub}"));
     }
-    Ok(params(&[
+    let mut query = params(&[
         ("gender", &g),
         ("query_gender", &g),
         ("genre_type", "0"),
@@ -93,7 +93,33 @@ pub fn category_params(
         ("page_version", "2"),
         ("limit", "20"),
         ("offset", &((page - 1) * 20).to_string()),
-    ]))
+    ]);
+    if id == "0" {
+        // The official merged category page accepts an unrestricted category.
+        // The older per-category page rejects category_id=0 (PARAM_INVALID).
+        let selected = [
+            enum_value(preferences, "words", WORDS)?,
+            enum_value(preferences, "status", STATUS)?,
+        ]
+        .into_iter()
+        .filter(|value| !value.ends_with("_default"))
+        .collect::<Vec<_>>()
+        .join(",");
+        let order = match enum_value(preferences, "sort", SORT)?.as_str() {
+            "sort_new_book" => "new_sort_newest",
+            "sort_score" => "new_sort_score",
+            _ => "new_sort_hot",
+        };
+        query.retain(|(key, _)| key != "selected_items");
+        query.extend(params(&[
+            ("category_new_page_715", "1"),
+            ("is_merged_landing_page", "true"),
+            ("category_type", if g == "1" { "7" } else { "8" }),
+            ("selected_items", &selected),
+            ("selected_order", order),
+        ]));
+    }
+    Ok(query)
 }
 pub fn rank_params(args: &Value, offset: u64) -> Result<Vec<(String, String)>> {
     let g = gender(args)?;
@@ -505,6 +531,35 @@ mod tests {
         assert!(category_params(&a, &json!({"sort":"sort_score&aid=1"}), 1).is_err());
         assert!(rank_params(&json!({"gender":1,"algo":"108&aid=1"}), 1).is_err());
         assert!(rank_params(&json!({"gender":1,"algo":"108","cell":"0"}), 1).is_err());
+    }
+    #[test]
+    fn all_novels_use_merged_page_channel_and_separate_sort() {
+        for (gender, channel) in [("1", "7"), ("0", "8")] {
+            let query = category_params(&json!({"id":"0","gender":gender}), &json!({}), 1).unwrap();
+            assert!(query.contains(&("category_new_page_715".into(), "1".into())));
+            assert!(query.contains(&("is_merged_landing_page".into(), "true".into())));
+            assert!(query.contains(&("category_type".into(), channel.into())));
+            assert!(query.contains(&("selected_items".into(), "".into())));
+            assert!(query.contains(&("selected_order".into(), "new_sort_hot".into())));
+        }
+        let query = category_params(
+            &json!({"id":"0","gender":"0"}),
+            &json!({"words":"word_num_gte100","status":"creation_status_end","sort":"sort_score"}),
+            2,
+        )
+        .unwrap();
+        assert!(query.contains(&(
+            "selected_items".into(),
+            "word_num_gte100,creation_status_end".into()
+        )));
+        assert!(query.contains(&("selected_order".into(), "new_sort_score".into())));
+        assert!(query.contains(&("offset".into(), "20".into())));
+        let specific = category_params(&json!({"id":"7","gender":"1"}), &json!({}), 1).unwrap();
+        assert!(
+            !specific
+                .iter()
+                .any(|(key, _)| key == "category_new_page_715")
+        );
     }
     #[test]
     fn categories_deduplicate_ids_and_keep_labels() {
