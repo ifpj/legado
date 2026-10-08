@@ -53,6 +53,7 @@ jobs:
           node --check web/community.js
           node tests/check-source-sync.cjs
           node tests/check-source-discovery.cjs
+          node tests/check-web-source-address.cjs
       - name: Image name
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fanqie-relay" >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -75,11 +76,11 @@ jobs:
           for token in "" "ci-test-token"; do
             docker run --detach --name relay-smoke --read-only --cap-drop ALL \
               --security-opt no-new-privileges --publish 127.0.0.1:19670:19670 \
-              --env FANQIE_RELAY_PUBLIC_URL=http://127.0.0.1:19670 \
               --env FANQIE_RELAY_TOKEN="$token" fanqie-relay:test
             curl --fail --silent --show-error --retry 20 --retry-connrefused --retry-delay 1 \
               http://127.0.0.1:19670/health
             python3 tests/smoke-container.py --arch "$ARCH" --token "$token"
+            test "$(docker inspect --format '{{.Config.User}}' relay-smoke)" != 0
             docker stop --time 10 relay-smoke
             test "$(docker inspect --format '{{.State.ExitCode}}' relay-smoke)" = 0
             docker rm relay-smoke

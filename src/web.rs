@@ -9,7 +9,6 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::net::{Ipv4Addr, UdpSocket};
 
 const SOURCE: &str = include_str!("../source/fanqie.js");
 const SOURCE_CONFIG: &str = include_str!("../source/source.config.json");
@@ -97,19 +96,53 @@ pub fn routes() -> Router<Service> {
         .route("/admin/catalog", get(catalog))
         .route("/admin/requests/{id}", get(detail))
 }
-pub fn public_url(port: u16) -> Result<String> {
-    if let Ok(base) = std::env::var("FANQIE_RELAY_PUBLIC_URL") {
-        return normalize_base(&base);
-    }
-    let ip = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+pub fn public_url() -> Result<Option<String>> {
+    std::env::var("FANQIE_RELAY_PUBLIC_URL")
         .ok()
-        .and_then(|s| {
-            s.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).ok()?;
-            Some(s.local_addr().ok()?.ip())
+        .filter(|base| !base.trim().is_empty())
+        .map(|base| normalize_base(&base))
+        .transpose()
+}
+fn first_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)?
+        .to_str()
+        .ok()?
+        .split(',')
+        .next()
+        .map(str::trim)
+}
+fn request_base(
+    explicit: Option<&str>,
+    configured: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<String> {
+    if let Some(base) = explicit.or(configured) {
+        return normalize_base(base);
+    }
+    // Proxies should replace these headers with the original public host/protocol.
+    let forwarded = first_header(headers, "forwarded").unwrap_or("");
+    let parameter = |name: &str| {
+        forwarded.split(';').find_map(|part| {
+            let (key, value) = part.trim().split_once('=')?;
+            key.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| value.trim().trim_matches('"'))
         })
-        .filter(|ip| !ip.is_unspecified())
-        .unwrap_or(Ipv4Addr::LOCALHOST.into());
-    Ok(format!("http://{ip}:{port}"))
+    };
+    let host = parameter("host")
+        .or_else(|| first_header(headers, "x-forwarded-host"))
+        .or_else(|| first_header(headers, "host"))
+        .ok_or_else(|| anyhow::anyhow!("请求缺少服务主机名"))?;
+    let scheme = parameter("proto")
+        .or_else(|| first_header(headers, "x-forwarded-proto"))
+        .unwrap_or("http");
+    ensure!(
+        matches!(scheme, "http" | "https"),
+        "服务协议必须是 HTTP/HTTPS"
+    );
+    let _authority: axum::http::uri::Authority = host.parse()?;
+    normalize_base(&format!("{scheme}://{host}"))
 }
 pub fn normalize_base(base: &str) -> Result<String> {
     let mut url = url::Url::parse(base.trim())?;
@@ -132,8 +165,12 @@ struct SourceQuery {
     base: Option<String>,
     download: Option<String>,
 }
-async fn qr(State(service): State<Service>, Query(q): Query<SourceQuery>) -> Response {
-    let base = match normalize_base(q.base.as_deref().unwrap_or(&service.public_url)) {
+async fn qr(
+    State(service): State<Service>,
+    headers: HeaderMap,
+    Query(q): Query<SourceQuery>,
+) -> Response {
+    let base = match request_base(q.base.as_deref(), service.public_url.as_deref(), &headers) {
         Ok(v) => v,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "INVALID_BASE", "服务地址无效"),
     };
@@ -189,7 +226,7 @@ async fn source(
             "请先在管理页填写服务令牌，再下载书源文件导入阅读",
         );
     }
-    let base = match normalize_base(q.base.as_deref().unwrap_or(&service.public_url)) {
+    let base = match request_base(q.base.as_deref(), service.public_url.as_deref(), &headers) {
         Ok(v) => v,
         Err(_) => {
             return error_response(
@@ -227,7 +264,7 @@ async fn source_json(
             "请先在管理页填写服务令牌，再下载书源文件导入阅读",
         );
     }
-    let base = match normalize_base(q.base.as_deref().unwrap_or(&service.public_url)) {
+    let base = match request_base(q.base.as_deref(), service.public_url.as_deref(), &headers) {
         Ok(v) => v,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "INVALID_BASE", "服务地址无效"),
     };
@@ -259,11 +296,15 @@ async fn status(State(service): State<Service>, headers: HeaderMap) -> Response 
         );
     }
     let mut value = service.monitor.snapshot();
-    value["service"] = json!({"version":env!("CARGO_PKG_VERSION"),"platform":std::env::consts::OS,"arch":std::env::consts::ARCH,"listen":service.listen,"publicUrl":service.public_url,"responseCache":false,"tokenEnabled":service.token.is_some(),"concurrency":service.max_concurrency,"contentConcurrencyPerDevice":1,"contentBatchSize":30,"batchIntervalMs":service.batch_interval_ms,"contentQueueTimeoutMs":45000,"availableSlots":service.concurrency.available_permits(),"gzip":true,"memory":crate::runtime::memory()});
+    let public_url = match request_base(None, service.public_url.as_deref(), &headers) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "INVALID_BASE", "服务地址无效"),
+    };
+    value["service"] = json!({"version":env!("CARGO_PKG_VERSION"),"platform":std::env::consts::OS,"arch":std::env::consts::ARCH,"listen":service.listen,"publicUrl":public_url,"responseCache":false,"tokenEnabled":service.token.is_some(),"concurrency":service.max_concurrency,"contentConcurrencyPerDevice":1,"contentBatchSize":30,"batchIntervalMs":service.batch_interval_ms,"contentQueueTimeoutMs":45000,"availableSlots":service.concurrency.available_permits(),"gzip":true,"memory":crate::runtime::memory()});
     value["service"]["network"] = service.network.status();
     value["tips"] = json!([
         {"level":"info","title":"每次刷新都取得最新数据","text":"实时请求官方接口，连接池与设备密钥复用不会缓存书籍内容。"},
-        {"level":"info","title":"在手机上使用电脑的局域网地址","text":"手机与 Windows 保持同一局域网；127.0.0.1 在手机上指向手机自身。"},
+        {"level":"info","title":"书源自动使用当前访问地址","text":"域名、端口和 HTTPS 跟随访问地址；127.0.0.1 在手机上指向手机自身。"},
         {"level":"info","title":"登录后可访问书架和历史","text":"导入后在书源登录界面完成官方网页登录，会话由阅读保存。"}
     ]);
     Json(value).into_response()
@@ -425,6 +466,76 @@ async fn catalog(State(service): State<Service>, headers: HeaderMap) -> Response
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn import_address_follows_host_port_and_proxy_https() {
+        let cases: &[(&[(&str, &str)], &str)] = &[
+            (&[("host", "relay.lan:122")], "http://relay.lan:122"),
+            (&[("host", "1.1.1.1:8088")], "http://1.1.1.1:8088"),
+            (&[("host", "[::1]:122")], "http://[::1]:122"),
+            (
+                &[
+                    ("host", "container:19670"),
+                    ("x-forwarded-host", "books.example:8443, proxy.local"),
+                    ("x-forwarded-proto", "https, http"),
+                ],
+                "https://books.example:8443",
+            ),
+            (
+                &[
+                    ("host", "container:19670"),
+                    (
+                        "forwarded",
+                        "for=192.0.2.1; Host=\"books.example:443\"; Proto=https, for=proxy",
+                    ),
+                    ("x-forwarded-host", "ignored.example"),
+                ],
+                "https://books.example",
+            ),
+        ];
+        for (values, expected) in cases {
+            let mut headers = HeaderMap::new();
+            for (name, value) in *values {
+                headers.insert(
+                    header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                    value.parse().unwrap(),
+                );
+            }
+            let base = request_base(None, None, &headers).unwrap();
+            assert_eq!(&base, expected);
+            assert!(source_text(&base, None).contains(&serde_json::to_string(&base).unwrap()));
+        }
+    }
+    #[test]
+    fn import_address_overrides_and_invalid_authorities() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "relay.lan:122".parse().unwrap());
+        assert_eq!(
+            request_base(None, Some("https://fixed.example"), &headers).unwrap(),
+            "https://fixed.example"
+        );
+        assert_eq!(
+            request_base(
+                Some("http://manual.lan:8088/"),
+                Some("https://fixed.example"),
+                &headers
+            )
+            .unwrap(),
+            "http://manual.lan:8088"
+        );
+        for host in [
+            "user@relay.lan",
+            "relay.lan/path",
+            "relay.lan?query",
+            "relay.lan:badport",
+        ] {
+            headers.insert(header::HOST, host.parse().unwrap());
+            assert!(request_base(None, None, &headers).is_err(), "{host}");
+        }
+        headers.insert(header::HOST, "relay.lan:122".parse().unwrap());
+        headers.insert("x-forwarded-proto", "file".parse().unwrap());
+        assert!(request_base(None, None, &headers).is_err());
+        assert!(request_base(None, None, &HeaderMap::new()).is_err());
+    }
     #[test]
     fn exported_source_quotes_host_and_token_and_preserves_exact_ids() {
         let base = normalize_base("http://my-pc.lan:19670/").unwrap();

@@ -21,5 +21,6 @@
 !/tests/signature-vectors.json
 !/tests/check-source-sync.cjs
 !/tests/check-source-discovery.cjs
+!/tests/check-web-source-address.cjs
 !/tests/smoke-container.py
 **/__pycache__/

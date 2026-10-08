@@ -45,14 +45,6 @@ if ($Build -or $Test -or -not (Test-Path -LiteralPath $taskBinary)) {
         if ($LASTEXITCODE -ne 0) { throw 'Windows release build failed.' }
     } finally { Pop-Location }
 }
-if (-not $PublicUrl) {
-    $taskAddress = Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway } |
-        ForEach-Object { $_.IPv4Address.IPAddress } | Where-Object {
-            $_ -match '^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)'
-        } | Select-Object -First 1
-    if (-not $taskAddress) { $taskAddress = '127.0.0.1' }
-    $PublicUrl = "http://${taskAddress}:$Port"
-}
 $env:FANQIE_RELAY_LISTEN = "${Listen}:$Port"
 $env:FANQIE_RELAY_PUBLIC_URL = $PublicUrl
 if ($Development) { $env:FANQIE_RELAY_WEB_DIR = Join-Path $taskProject 'web' }
@@ -70,6 +62,6 @@ for ($taskAttempt = 0; $taskAttempt -lt 30; $taskAttempt++) {
     } catch { Start-Sleep -Milliseconds 200 }
 }
 if (-not $taskReady) { throw 'Windows relay did not start; inspect runtime/windows-error.log.' }
-$taskInfo = @{ pid = $taskProcess.Id; console = "http://127.0.0.1:$Port/"; phone = $PublicUrl; version = $taskHealth.version }
+$taskInfo = @{ pid = $taskProcess.Id; console = "http://127.0.0.1:$Port/"; importAddress = $(if ($PublicUrl) { $PublicUrl } else { 'automatic (request host)' }); version = $taskHealth.version }
 $taskInfo | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $taskRuntime 'windows.json') -Encoding utf8
 Write-Output ($taskInfo | ConvertTo-Json)

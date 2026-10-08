@@ -38,7 +38,7 @@ struct Service {
     pages: Arc<Mutex<HashMap<String, PageState>>>,
     token: Option<String>,
     monitor: monitor::Monitor,
-    public_url: String,
+    public_url: Option<String>,
     listen: String,
     concurrency: Arc<tokio::sync::Semaphore>,
     max_concurrency: usize,
@@ -1177,7 +1177,7 @@ async fn main() -> Result<()> {
     let network = Arc::new(network::Network::new()?);
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     let actual_listen = listener.local_addr()?.to_string();
-    let public_url = web::public_url(listener.local_addr()?.port())?;
+    let public_url = web::public_url()?;
     let max_concurrency = std::env::var("FANQIE_RELAY_CONCURRENCY")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -1206,9 +1206,12 @@ async fn main() -> Result<()> {
         env!("CARGO_PKG_VERSION")
     );
     println!(
-        "Web console: http://127.0.0.1:{} | Phone access: {}",
+        "Web console: http://127.0.0.1:{} | Import address: {}",
         listener.local_addr()?.port(),
-        service.public_url
+        service
+            .public_url
+            .as_deref()
+            .unwrap_or("automatic (request host)")
     );
     axum::serve(
         monitor::TrackedListener {

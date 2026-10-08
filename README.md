@@ -10,14 +10,18 @@ Rust 负责官方接口请求、签名、匿名设备与正文密钥、解密解
 
 ```sh
 cp .env.example .env
-# 编辑 .env：设置手机可访问的主机地址，例如 http://your-server.lan:19670
+# 可直接使用默认配置；需要换外部端口时修改 FANQIE_RELAY_PORT
 # 需要访问令牌时填写 FANQIE_RELAY_TOKEN；留空即允许直接访问。
 docker compose pull
 docker compose up -d
 docker compose logs -f
 ```
 
-打开 `http://主机地址:19670/`。`FANQIE_RELAY_PUBLIC_URL` 必须是手机可访问的地址，不要填写容器内部地址或手机自身的 `127.0.0.1`。外部端口可通过 `FANQIE_RELAY_PORT` 调整，并同步修改公开 URL。服务内部监听端口保持 19670。Compose 使用非 root 用户、只读文件系统，不需要挂载书源、数据库或配置目录。
+在手机上打开 `http://主机地址:外部端口/`，导入链接、二维码和生成的书源自动使用当前访问的域名、IP、端口及协议。例如映射 `122:19670` 后，打开 `http://your-server.lan:122/` 即会生成该地址的书源，无需配置固定 IP。外部端口可通过 `FANQIE_RELAY_PORT` 调整，服务内部仍监听 19670。手机上的 `127.0.0.1` 指向手机自身。
+
+`FANQIE_RELAY_PUBLIC_URL` 默认留空；仅需要固定导出地址时填写，也可在 Web 手动覆盖。生成地址的优先级为 `?base=` → 配置的固定地址 → 请求地址；反向代理支持标准 `Forwarded` 或 `X-Forwarded-Host` / `X-Forwarded-Proto`，代理应覆盖这些头并传递外部域名（含端口）及协议。当前支持部署在域名根路径。
+
+运行镜像使用 `gcr.io/distroless/static:nonroot`，Rust 在 musl 环境静态构建并检查无动态链接依赖；不包含 Shell、包管理器或 curl，未启用容器定时健康检测。Compose 使用非 root 用户、只读文件系统，不需要挂载书源、数据库或配置目录。
 
 也可在服务根目录自行构建：
 
@@ -28,7 +32,7 @@ docker buildx build --platform linux/amd64,linux/arm64 \
   -f Dockerfile -t your-registry/fanqie-relay:latest --push .
 ```
 
-GitHub Actions 在 `fanqie` 分支更新相关文件时自动运行，也可手动触发。AMD64 和 ARM64 分别在对应的原生 runner 构建；每个平台运行 Rust 单元测试、书源回调测试，以及实际容器的匿名/令牌访问、嵌入页面与书源导出、精确 ID、完整元数据、凭证隐藏、gzip 和正常停止检查。两者通过后合并镜像 manifest 并发布至 GHCR，构建缓存按架构隔离。流程见 [fanqie-relay-docker.yml](.github/workflows/fanqie-relay-docker.yml)，平台构建方式参考 [Docker 官方说明](https://docs.docker.com/build/ci/github-actions/multi-platform/)。首次创建的 GHCR 包可能需要在 GitHub 的包设置中设为 Public；私有包拉取需要 `docker login ghcr.io`。
+GitHub Actions 在 `fanqie` 分支更新相关文件时自动运行，也可在 Actions 重新运行已有构建。AMD64 和 ARM64 分别在对应的原生 runner 构建；每个平台运行 Rust 单元测试、书源回调测试，以及实际容器的匿名/令牌访问、嵌入页面与书源导出、精确 ID、完整元数据、凭证隐藏、gzip 和正常停止检查。两者通过后合并镜像 manifest 并发布至 GHCR，构建缓存按架构隔离。流程见 [fanqie-relay-docker.yml](.github/workflows/fanqie-relay-docker.yml)，平台构建方式参考 [Docker 官方说明](https://docs.docker.com/build/ci/github-actions/multi-platform/)。本仓库镜像公开，可免登录拉取。
 
 ## 书源导入与登录
 
@@ -54,7 +58,7 @@ GitHub Actions 在 `fanqie` 分支更新相关文件时自动运行，也可手�
 | 环境变量 | 默认值 / 用途 |
 |---|---|
 | `FANQIE_RELAY_LISTEN` | 原生程序 `127.0.0.1:19670`，Docker `0.0.0.0:19670` |
-| `FANQIE_RELAY_PUBLIC_URL` | 手机可访问的 HTTP(S) 服务地址；容器部署请明确设置 |
+| `FANQIE_RELAY_PUBLIC_URL` | 留空自动使用请求地址；可填写 HTTP(S) 固定导出地址 |
 | `FANQIE_RELAY_TOKEN` | 空值表示免令牌；否则使用 Bearer 验证 |
 | `FANQIE_RELAY_CONCURRENCY` | 默认 8，可设置 1～64；同设备正文并发始终为 1 |
 
@@ -67,14 +71,13 @@ GitHub Actions 在 `fanqie` 分支更新相关文件时自动运行，也可手�
 ```sh
 cargo test --locked
 cargo build --release --locked
-FANQIE_RELAY_PUBLIC_URL=http://your-server.lan:19670 \
 FANQIE_RELAY_LISTEN=0.0.0.0:19670 ./target/release/fanqie-relay
 ```
 
 Windows 需 Rust 及 Visual Studio C++ Build Tools，在服务根目录执行：
 
 ```powershell
-./run-windows.ps1 -Build -Test -PublicUrl http://your-server.lan:19670
+./run-windows.ps1 -Build -Test
 ./run-windows.ps1 -Stop
 ```
 
