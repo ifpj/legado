@@ -78,6 +78,7 @@ pub fn category_params(
     let g = gender(args)?;
     let id = model::s(args, "id");
     ensure!(id.parse::<u64>().is_ok(), "分类 ID 无效");
+    let limit = if id == "0" { 10 } else { 20 };
     let mut selected = filters(preferences)?;
     if let Some(sub) = args.get("sub").map(model::string).filter(|s| s != "0") {
         ensure!(sub.parse::<u64>().is_ok(), "分类标签无效");
@@ -91,8 +92,8 @@ pub fn category_params(
         ("selected_items", &selected),
         ("source", "front_category"),
         ("page_version", "2"),
-        ("limit", "20"),
-        ("offset", &((page - 1) * 20).to_string()),
+        ("limit", &limit.to_string()),
+        ("offset", &((page - 1) * limit).to_string()),
     ]);
     if id == "0" {
         // The official merged category page accepts an unrestricted category.
@@ -115,9 +116,14 @@ pub fn category_params(
             ("category_new_page_715", "1"),
             ("is_merged_landing_page", "true"),
             ("category_type", if g == "1" { "7" } else { "8" }),
-            ("selected_items", &selected),
+            ("client_req_type", if page == 1 { "3" } else { "2" }),
+            ("no_need_all_tag", "false"),
+            ("selected_item_from_front_page", "0"),
             ("selected_order", order),
         ]));
+        if !selected.is_empty() {
+            query.push(("selected_items".into(), selected));
+        }
     }
     Ok(query)
 }
@@ -539,8 +545,11 @@ mod tests {
             assert!(query.contains(&("category_new_page_715".into(), "1".into())));
             assert!(query.contains(&("is_merged_landing_page".into(), "true".into())));
             assert!(query.contains(&("category_type".into(), channel.into())));
-            assert!(query.contains(&("selected_items".into(), "".into())));
+            assert!(!query.iter().any(|(key, _)| key == "selected_items"));
             assert!(query.contains(&("selected_order".into(), "new_sort_hot".into())));
+            assert!(query.contains(&("limit".into(), "10".into())));
+            assert!(query.contains(&("client_req_type".into(), "3".into())));
+            assert!(query.contains(&("selected_item_from_front_page".into(), "0".into())));
         }
         let query = category_params(
             &json!({"id":"0","gender":"0"}),
@@ -553,7 +562,8 @@ mod tests {
             "word_num_gte100,creation_status_end".into()
         )));
         assert!(query.contains(&("selected_order".into(), "new_sort_score".into())));
-        assert!(query.contains(&("offset".into(), "20".into())));
+        assert!(query.contains(&("offset".into(), "10".into())));
+        assert!(query.contains(&("client_req_type".into(), "2".into())));
         let specific = category_params(&json!({"id":"7","gender":"1"}), &json!({}), 1).unwrap();
         assert!(
             !specific
