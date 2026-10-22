@@ -34,6 +34,6 @@ function getChapters(book){
 function getContent(chapter,book,nextChapterUrl){
     var doc=cfDoc(chapter.url),heading=cfText(doc.selectFirst('h1')),el=doc.selectFirst('.txtnav,#txtcontent');if(!el)throw '正文容器不存在';
     el.select('script,style,h1,.txtinfo,.bottom-ad,.txtad,.txtcenter,ins').remove();
-    var text=String(cfDocument(String(el.html()).replace(/<br\s*\/?\s*>/gi,'\n')).wholeText()).replace(/\n[ \t\u3000]*/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+    var text=String(cfDocument(String(el.html()).replace(/<br\s*\/?\s*>/gi,'\n')).wholeText()).replace(/(^|\n)[^\S\r\n]+/g,'$1').replace(/\n{3,}/g,'\n\n').trim();
     if(!text)throw '正文为空';return cfCleanChapterText(String(java.t2s(text)),chapter.title,heading,book&&book.name);
 }

@@ -1,7 +1,7 @@
 // Runs in Legado. The gateway fetches pages; the source only parses HTML.
 // Text conversion uses Legado's built-in converter, never a local character map.
 function cfChapterHeading(value,bookName) {
-    function key(text){return String(text||'').replace(/[\uff01-\uff5e]/g,function(c){return String.fromCharCode(c.charCodeAt(0)-0xfee0);}).replace(/[\s\u200b\ufeff]/g,'').replace(/[·•…“”‘’"'「」『』]/g,'').replace(/\.{3,}/g,'').toLowerCase();}
+    function key(text){return String(text||'').replace(/[\uff01-\uff5e]/g,function(c){return String.fromCharCode(c.charCodeAt(0)-0xfee0);}).replace(/[\s\u200b\ufeff]/g,'').replace(/[·•…“”‘’"'「」『』~]/g,'').replace(/\.{3,}/g,'').toLowerCase();}
     var text=key(value),book=key(bookName),bookPrefix=false;
     if(book&&text.indexOf(book)===0&&/^第[零〇一二三四五六七八九十百千万两\d]+[章回节卷集话]/.test(text.substring(book.length))){text=text.substring(book.length);bookPrefix=true;}
     text=text.replace(/^\d+[.、](?=\D)/,'');
@@ -11,8 +11,14 @@ function cfChapterHeading(value,bookName) {
         core=core.replace(/^\d+[:、]/,'');
         if(core.indexOf(heading[0])===0)core=core.substring(heading[0].length);
     }
-    core=core.replace(/\(([^()]{1,50})\)$/,function(note,inside){return /(?:\d|[一二三四五六七八九十])[\d.一二三四五六七八九十]*[kw万千字]|月票|推荐票|求票|加更|合一/.test(inside)?'':note;});
-    return {key:text.replace(/[:、]+$/,''),core:core.replace(/[:、]+$/,'').replace(/\./g,''),numbered:!!heading,bookPrefix:bookPrefix};
+    if(heading)core=core.replace(/\([^()]*\)?$/,'');
+    return {key:text.replace(/[:、]+$/,''),core:core.replace(/[^a-z0-9\u3400-\u9fff]/g,''),number:heading?heading[1]:'',numbered:!!heading,bookPrefix:bookPrefix};
+}
+function cfNearChapterTitle(a,b){
+    if(Math.min(a.length,b.length)<6||Math.abs(a.length-b.length)>1)return false;
+    var i=0,j=0,edits=0;
+    while(i<a.length&&j<b.length){if(a.charAt(i)===b.charAt(j)){i++;j++;continue;}if(++edits>1)return false;if(a.length>=b.length)i++;if(b.length>=a.length)j++;}
+    return edits+(a.length-i)+(b.length-j)<=1;
 }
 function cfCleanChapterText(value,chapterTitle,pageHeading,bookName) {
     var text=String(value).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g,'');
@@ -34,6 +40,7 @@ function cfCleanChapterText(value,chapterTitle,pageHeading,bookName) {
             target=targets[t];
             if(candidate.key.length>=2&&candidate.key===target.key)same=true;
             else if(candidate.numbered&&target.numbered&&candidate.core.length>=1&&candidate.core===target.core)same=true;
+            else if(candidate.number&&candidate.number===target.number&&cfNearChapterTitle(candidate.core,target.core))same=true;
             else if(candidate.bookPrefix&&candidate.numbered&&!candidate.core&&target.numbered)same=true;
         }
         if(!same||lines.slice(1).join('\n').trim().length<20)break;

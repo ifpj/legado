@@ -1,9 +1,13 @@
 var CF_READER_KEY='jieqi2026abcd12';
-// Match a normalized detection copy, then remove only the corresponding original
-// spans. Novel text, accents, supplementary characters and punctuation stay intact.
+// Delete site-name paragraphs regardless of the random slogan or domain font.
+// Other known watermarks use a detection copy without rewriting surrounding text.
 function cfCleanTwkanContent(value) {
-    var lines=String(value).split('♙♕\u2003\u2003😲✌').join('').replace(/(^|\n)[^\S\r\n]*(?:\]>|>)[^\S\r\n]*(?=\n*$)/,'$1').split('\n');
-    var suspect=/台湾小说网|google|记住首发网站域名|本书由|sudu|首发更新|请记住“””|69[^\r\n]{0,30}[.．]|[\u00a4\u1d00-\u1dbf\u2100-\u24ff\u2776-\u2788\ud835\ud83c\uff10-\uff19\uff21-\uff3a\uff41-\uff5a]/i;
+    var symbol='(?:[ஜ۩۞ඏൠ\\u2190-\\u2bff]|[\\ud83c-\\ud83e][\\udc00-\\udfff])(?:\\ufe0f)?';
+    var lines=String(value).replace(/(?:^|\n)本章想法[\s\S]*上APP[，,]和更多书友互动\s*$/i,'').replace(new RegExp('(?:'+symbol+'){2}\\u2003{2}(?:'+symbol+'){2}','g'),'').replace(new RegExp('((?:'+symbol+'){2,})\\u2003+\\1','g'),'').replace(/(^|\n)[^\S\r\n]*(?:\]>|>)[^\S\r\n]*(?=\n*$)/,'$1').split('\n');
+    // The site name is the deletion marker. Random slogans and domain fonts
+    // do not change the decision; the entire marked paragraph is discarded.
+    lines=lines.filter(function(line){var marker=line.replace(/[\s\u200b-\u200d\u2060\ufeff“”"'⊥]/g,'');return !/[台臺][湾灣]小[说說][网網]|记住更新地址不迷路|本网站分享到(?:Facebook|脸书)|最新小说在.*首发[!！]/i.test(marker)&&!/^小说网(?:首发|手打更新)[.a-z0-9]*$|^前往必(?:应)?搜索$|^(?:原文|(?:更多|最新|热门).*小说)在看[!！。]?$/i.test(marker);});
+    var suspect=/google|搜索|记住首发网站域名|本书由|sudu|首发更新|首[“”]*发|请收|请记住|“德”“旗”|吧书69新|mo[ɔc][.．]|6[】\]]|69[^\r\n]{0,30}[.．]|[\u00a4\u1d00-\u1dbf\u2070-\u24ff\u2776-\u2788\ud835\ud83c\uff10-\uff19\uff21-\uff3a\uff41-\uff5a]/i;
     // All templates are confined to one line. Avoid per-character mapping of
     // ordinary narrative paragraphs, which is expensive inside Rhino.
     for(var line=0;line<lines.length;line++)if(suspect.test(lines[line]))lines[line]=cfCleanTwkanLine(lines[line]);
@@ -11,18 +15,20 @@ function cfCleanTwkanContent(value) {
 }
 function cfCleanTwkanLine(value) {
     var original=String(value),key='',starts=[],ends=[],ranges=[];
-    var confusable={'ѕ':'s','χ':'x','м':'m','ᗰ':'m','๏':'o','¢':'c','ᑌ':'u','ɡ':'g'};
+    var confusable={},glyphs={s:'ѕร丂ƨʂᔕꜱꞩꙅ',h:'ħнᕼ卄ⱨ♄ʜңһђ',u:'ᑌยυㄩцʊ',x:'χж乂᙭хҳ✘〤',c:'¢ςᑕ匚ƈϲɔ',o:'๏øσοоㄖ口ᗝ',m:'мᗰ爪μɱ♏๓ϻ',g:'ɡ'};
+    for(var letter in glyphs)for(var glyph=0;glyph<glyphs[letter].length;glyph++)confusable[glyphs[letter].charAt(glyph)]=letter;
     for(var i=0;i<original.length;){
         var begin=i,point=original.charCodeAt(i++),piece=original.charAt(begin);
         if(point>=0xd800&&point<=0xdbff&&i<original.length){
             var low=original.charCodeAt(i);
             if(low>=0xdc00&&low<=0xdfff){point=0x10000+((point-0xd800)<<10)+low-0xdc00;piece=original.substring(begin,++i);}
         }
-        if(point>=0x1f150&&point<=0x1f169)piece=String.fromCharCode(97+point-0x1f150);
+        if(point>=0x1f130&&point<=0x1f149)piece=String.fromCharCode(97+point-0x1f130);
+        else if(point>=0x1f150&&point<=0x1f169)piece=String.fromCharCode(97+point-0x1f150);
         else if(point>=0x1f170&&point<=0x1f189)piece=String.fromCharCode(97+point-0x1f170);
         else if(point>=0x2776&&point<=0x277e)piece=String(point-0x2775);
         else if(point>=0x2780&&point<=0x2788)piece=String(point-0x277f);
-        else if((point>=0xc0&&point<=0x2ff)||(point>=0x1d00&&point<=0x1dbf)||(point>=0x1e00&&point<=0x1eff)||(point>=0x2100&&point<=0x24ff)||(point>=0xff00&&point<=0xffef)||(point>=0x1d400&&point<=0x1d7ff)){
+        else if((point>=0xc0&&point<=0x52f)||(point>=0x1d00&&point<=0x1dbf)||(point>=0x1e00&&point<=0x1eff)||(point>=0x2070&&point<=0x24ff)||(point>=0xff00&&point<=0xffef)||(point>=0x1d400&&point<=0x1d7ff)){
             piece=String(Packages.java.text.Normalizer.normalize(piece,Packages.java.text.Normalizer.Form.NFKD));
         }
         piece=piece.toLowerCase();
@@ -37,28 +43,44 @@ function cfCleanTwkanLine(value) {
     }
     function add(from,to){if(to>from)ranges.push({start:starts[from],end:ends[to-1]});}
     function match(pattern,check){var found;while((found=pattern.exec(key))!==null){if(!check||check.test(found[0]))add(found.index,found.index+found[0].length);}}
-    var site=/台湾小说网|twkan\.com/;
-    match(/[【\[](?:写到这里我希望读者记一下我们域名|记住本站域名)[^】\]\r\n]{0,260}[】\]]/g,site);
-    match(/\(请记住[^()\r\n]{0,260}网站,[ \t]*观看最快的章节更新\)/g,site);
-    match(/本书首发[^\r\n]{0,260}?提供给你无错章节,[ \t]*无乱序章节的阅读体验/g,site);
     match(/google[ \t]*搜索[ \t]*twkan/g);
+    match(/搜索[a-z0-9.]+(?:com|cc|org)阅读[◆]?/g);
     match(/记住首发网站域名[ \t]*twkan\.com/g);
     match(/本书由[ \t]*twkan\.com[ \t]*全网首发/g);
-    match(/(?:(?:找|读)台湾好书(?:上|选)|(?:看|追|读)台湾小说(?:就上|就来|就去|选))?台湾小说网(?:藏书[全多]|解书荒|伴你[闲读]|体验[棒佳]|超(?:贴心|便捷|顺畅))?[,→][ \t]*twkan\.com(?:超(?:方便|省心|实用|贴心|靠谱|流畅|给力|赞)|等你(?:读|寻)|任你选|随时享|轻松(?:读|看))?/g);
+    match(/“德”“旗”“小”“说”“网”“手打”“更新”|吧书69新/g);
     match(/sudugu\.cc首发更新,无错字。看不到地址输入的拼音后缀\.cc即可进入首发更新站点。/g);
-    // This observed damaged notice has no usable domain left; keep the match
-    // exact rather than generalizing it to ordinary quotation marks or prose.
-    match(/请记住“””小”说”唯一“网”址”:“”””\.”””””””\.”””,站“长有且只“有这一个网“站,其它网“站随“时断“更。/g);
-    var domain=/69shux\.com/g,found;
-    var decoration=/[ \t\u00a0\u2000-\u200a\u00b8\u00f8\u00a4\u00ba\u00b0`,\u2600-\u27ff\u25a0-\u25ff\u2022\u00b7\ud83c-\ud83e\udc00-\udfff]/;
-    while((found=domain.exec(key))!==null){
-        var from=found.index,to=from+found[0].length,left=from,right=to;
+    function quoted(text){return text.split('').join('[“”" ]*');}
+    match(new RegExp('(?:'+quoted('请收藏')+'|'+quoted('请记住')+')[^\\r\\n]*?'+quoted('其它网站随时断更')+'[“”。]*','g'),new RegExp(quoted('唯一网址')));
+    // Keep a positional index while discarding ornament separators. Chinese
+    // narrative remains a boundary; matching the fixed marker needs no wildcards.
+    var domainChars=[],positions=[],fontChars=[],fontPositions=[];
+    for(var k=0;k<key.length;k++){
+        if(/[a-z0-9\u3400-\u9fff]/.test(key.charAt(k))){domainChars.push(key.charAt(k));positions.push(k);}
+        if(/[a-z0-9.\u00c0-\u1fff\u3400-\u9fff]/.test(key.charAt(k))){fontChars.push(key.charAt(k));fontPositions.push(k);}
+    }
+    var domainKey=domainChars.join(''),domain=/69shuxco?m|mocxuhs[69]{1,2}/g,found,domains=[];
+    while((found=domain.exec(domainKey))!==null)domains.push({from:positions[found.index],to:positions[found.index+found[0].length-1]+1});
+    // Unknown non-ASCII font glyphs are allowed in their fixed slots; already
+    // restored ASCII letters must agree, so unrelated 69xxxx domains stay intact.
+    var fontKey=fontChars.join(''),fontDomain=/69([a-z\u00c0-\u1fff]{4})\.([a-z\u00c0-\u1fff]{3})/g;
+    while((found=fontDomain.exec(fontKey))!==null){
+        var letters=found[1]+found[2],expected='shuxcom',valid=/[^a-z]/.test(letters);
+        for(var f=0;f<letters.length;f++)if(/[a-z]/.test(letters.charAt(f))&&letters.charAt(f)!==expected.charAt(f))valid=false;
+        if(valid)domains.push({from:fontPositions[found.index],to:fontPositions[found.index+found[0].length-1]+1});
+    }
+    var decoration=/[\sღ‿⁀⁔ஜ۩۞ඏൠ\u00b8\u00f8\u00a4\u00ba\u00b0\u00a7\u00a8\u00af\u00b4\u00d7\u00f7`,'~!*_|.\-«»<>()v【】\[\]\u200b-\u200f\u2060\ufe0e\ufe0f\u1d00-\u1dbf\u2070-\u209f\u2190-\u2bff\u2022\u00b7\ud83c-\ud83e\udc00-\udfff]/;
+    for(var d=0;d<domains.length;d++){
+        var from=domains[d].from,to=domains[d].to,left=from,right=to;
         if(/[a-z0-9.-]/.test(key.charAt(from-1))||/[a-z0-9.-]/.test(key.charAt(to)))continue;
-        while(left>0&&from-left<64&&decoration.test(key.charAt(left-1)))left--;
-        while(right<key.length&&right-to<64&&decoration.test(key.charAt(right)))right++;
+        while(left>0&&decoration.test(original.substring(starts[left-1],ends[left-1])))left--;
+        while(right<key.length&&decoration.test(original.substring(starts[right],ends[right])))right++;
+        if(/-漫[~*'¨¯·]*舞[~*'¨¯· ]*$/.test(original.substring(0,starts[from]))&&/^[~*'¨¯· ]*舞[~*'¨¯·]*漫-/.test(original.substring(ends[to-1]))){
+            while(left>0&&(/[漫舞]/.test(key.charAt(left-1))||decoration.test(original.substring(starts[left-1],ends[left-1]))))left--;
+            while(right<key.length&&(/[漫舞]/.test(key.charAt(right))||decoration.test(original.substring(starts[right],ends[right]))))right++;
+        }
         // Decorative envelopes are stripped only when present on both sides of
         // this known watermark, never by deleting arbitrary emoji-only lines.
-        if(key.substring(left,from).replace(/[ \t\u00a0\u2000-\u200a]/g,'')&&key.substring(to,right).replace(/[ \t\u00a0\u2000-\u200a]/g,'')){from=left;to=right;}
+        if(key.substring(left,from).replace(/\s/g,'')&&key.substring(to,right).replace(/\s/g,'')){from=left;to=right;}
         add(from,to);
     }
     if(!ranges.length)return original;
