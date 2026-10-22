@@ -1,0 +1,15 @@
+*
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**
+!assets/
+!assets/**
+!profiles/
+!profiles/**
+!tests/
+!tests/**
+!LICENSE
+!LICENSES/
+!LICENSES/**
+!Dockerfile

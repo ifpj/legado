@@ -1,0 +1,262 @@
+//! Read fresh continuation operands and bounded POST navigation declarations.
+use crate::{
+    data::{self, Plan, Response},
+    re, require,
+    static_data::{origin, validate_url},
+    string, Result,
+};
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
+impl Response {
+    pub fn completion(&self) -> Result<Value> {
+        let values: HashSet<_> = self.literals.iter().map(|l| l.value.as_str()).collect();
+        require(!values.contains("fail"), "Child challenge returned failure")?;
+        Ok(
+            json!({"widgetToken":data::one(values.iter().filter(|v|(100..=16384).contains(&v.len())&&re(r"^1\.[A-Za-z0-9_.-]+$").is_match(v)).copied())?,"parentState":data::one(values.iter().filter(|v|v.len()<=16384&&data::token(v)&&v.contains("-1.3.1.1-")).copied())?}),
+        )
+    }
+    pub fn proof(&self) -> Result<Value> {
+        let values = self.values();
+        let mut counts = HashMap::<&str, usize>::new();
+        for value in &values {
+            *counts.entry(value).or_default() += 1;
+        }
+        let tokens: HashSet<_> = values
+            .iter()
+            .filter(|v| data::token(v) && v.contains("-1.3.1.1-"))
+            .copied()
+            .collect();
+        let state = data::one(tokens.iter().filter(|v| counts[**v] > 1).copied())?;
+        let submit = data::one(tokens.iter().filter(|v| **v != state).copied())?;
+        let suffix = data::one(
+            values
+                .iter()
+                .filter(|v| re(r"^[A-Za-z]{128}$").is_match(v) && counts[**v] == 2)
+                .copied(),
+        )?;
+        let numbers: HashMap<_, _> = counts
+            .iter()
+            .filter(|(v, _)| re(r"^(?:0|[1-9][0-9]{0,3})$").is_match(v))
+            .map(|(v, n)| (v.parse::<u64>().unwrap(), *n))
+            .collect();
+        let unique = |v: Vec<u64>| -> Result<u64> {
+            let s: HashSet<_> = v.into_iter().collect();
+            require(s.len() == 1, "Ambiguous work operand")?;
+            Ok(*s.iter().next().unwrap())
+        };
+        let budget = unique(
+            numbers
+                .iter()
+                .filter(|(n, c)| **c == 2 && **n > 0 && **n <= 1000)
+                .map(|(n, _)| *n)
+                .collect(),
+        )?;
+        let mode = unique(
+            numbers
+                .iter()
+                .filter(|(n, c)| **c == 2 && **n != budget)
+                .map(|(n, _)| *n)
+                .collect(),
+        )?;
+        let index = unique(
+            numbers
+                .iter()
+                .filter(|(n, c)| **c == 1 && (2..=129).contains(*n))
+                .map(|(n, _)| *n)
+                .collect(),
+        )?;
+        let input = data::json_input(&values)?;
+        require(
+            mode == 0 && !tokens.contains(input.as_str()),
+            "Unsupported proof mode",
+        )?;
+        Ok(
+            json!({"flow":self.one(data::FLOW)?,"hmwT6":self.one(data::TASK)?,"nuvy8":input,"nidg0":self.one(data::NONCE)?,"yVlbA2":submit,"vaZBm3":state,"suffix":suffix,"budgetMs":budget,"mode":mode,"previousCount":index}),
+        )
+    }
+    pub fn precursor(&self) -> Result<Value> {
+        let values = self.values();
+        let names: HashSet<_> = self.literals.iter().map(|l| l.value.as_str()).collect();
+        require(
+            [
+                "SlQq4", "QhCr7", "CyYT8", "hmwT6", "nuvy8", "vaZBm3", "yVlbA2",
+            ]
+            .iter()
+            .all(|v| names.contains(v)),
+            "Precursor declaration",
+        )?;
+        Ok(
+            json!({"flow":self.one(data::FLOW)?,"hmwT6":self.one(data::TASK)?,"nuvy8":data::json_input(&values)?,"yVlbA2":data::one(values.iter().filter(|v|data::token(v)&&v.contains("-1.3.1.1-")).copied())?,"nidg0":self.one(data::NONCE)?,"vaZBm3":"","script":data::one(names.into_iter().filter(|v|re(r"^/scripts/precursor/[a-f0-9]{12}/main\.js$").is_match(v)))?}),
+        )
+    }
+}
+#[derive(Clone)]
+pub struct Navigation {
+    pub url: String,
+    pub body: Vec<u8>,
+}
+pub fn navigation(
+    data: &Response,
+    plan: &Plan,
+    config: &Value,
+    page_url: &str,
+) -> Result<Option<Navigation>> {
+    let values: Vec<_> = data
+        .literals
+        .iter()
+        .map(|l| l.value.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !values.contains(&"form") || !values.contains(&"POST") {
+        return Ok(None);
+    }
+    require(
+        plan.meta["build"] == "d2d3316b729e"
+            && data.program.code_length <= 8192
+            && !values.contains(&"fail"),
+        "Unsupported parent navigation format",
+    )?;
+    let start = values.iter().position(|v| *v == "form").unwrap();
+    let expected = [
+        "form",
+        "action",
+        "method",
+        "POST",
+        "enctype",
+        "application/x-www-form-urlencoded",
+        "input",
+        "hidden",
+    ];
+    require(
+        values.get(start..start + expected.len()) == Some(expected.as_slice()),
+        "Parent form declaration",
+    )?;
+    let fields: Vec<_> = values
+        .iter()
+        .enumerate()
+        .filter(|(i, v)| *i > start && re(r"^[a-f0-9]{64}$").is_match(v))
+        .collect();
+    let tokens: Vec<_> = values
+        .iter()
+        .enumerate()
+        .filter(|(i, v)| {
+            *i > start
+                && (100..=16384).contains(&v.len())
+                && re(r"^[A-Za-z0-9_.-]+-[0-9]{10}-1\.0\.1\.1-[A-Za-z0-9_.-]+$").is_match(v)
+        })
+        .collect();
+    require(
+        fields.len() == 3
+            && fields.iter().map(|(_, v)| *v).collect::<HashSet<_>>().len() == 3
+            && tokens.len() == 1,
+        "Parent form fields",
+    )?;
+    let (a, b, c) = (fields[0].0, fields[1].0, fields[2].0);
+    require(
+        a >= 2
+            && values[a - 2..a] == ["input", "hidden"]
+            && values[a + 1..b] == ["input", "hidden"]
+            && values[b + 1..c] == ["input", "hidden"]
+            && tokens[0].0 == c + 1,
+        "Parent form order",
+    )?;
+    let before = validate_url(page_url)?;
+    let target = before
+        .join(config["fa"].as_str().unwrap_or(""))
+        .map_err(|_| crate::Error::new("INVALID_DATA", "Form URL"))?;
+    let query: Vec<_> = target
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    let issued: Vec<_> = query.iter().filter(|(k, _)| k == "__cf_chl_f_tk").collect();
+    let ordinary = |url: &url::Url| {
+        url.query_pairs()
+            .filter(|(k, _)| !k.starts_with("__cf_chl_"))
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect::<Vec<_>>()
+    };
+    require(
+        origin(target.as_str())? == origin(page_url)?
+            && target.path() == before.path()
+            && issued.len() == 1
+            && re(r"^[A-Za-z0-9_.-]{20,512}$").is_match(&issued[0].1)
+            && ordinary(&target) == ordinary(&before),
+        "Form does not belong to current page",
+    )?;
+    let mut body = url::form_urlencoded::Serializer::new(String::new());
+    body.append_pair(fields[0].1, string(&config["md"])?);
+    if let Some(v) = config["mdrd"].as_str().filter(|v| !v.is_empty()) {
+        body.append_pair(fields[1].1, v);
+    }
+    body.append_pair(fields[2].1, tokens[0].1);
+    Ok(Some(Navigation {
+        url: target.into(),
+        body: body.finish().into_bytes(),
+    }))
+}
+pub fn current_page_token(config: &Value) -> Result<String> {
+    let url = validate_url("https://placeholder.invalid/")?
+        .join(string(&config["cUPMDTk"])?)
+        .map_err(|_| crate::Error::new("INVALID_DATA", "Current page token URL"))?;
+    let tokens: Vec<_> = url
+        .query_pairs()
+        .filter(|(k, _)| k == "__cf_chl_tk")
+        .map(|(_, v)| v.into_owned())
+        .collect();
+    require(tokens.len() == 1, "Missing current page token")?;
+    Ok(tokens[0].clone())
+}
+pub enum Next {
+    Done(Value),
+    Work(Value),
+}
+pub fn next(response: &Response) -> Result<Next> {
+    if let Ok(done) = response.completion() {
+        return Ok(Next::Done(done));
+    }
+    require(
+        !response.literals.iter().any(|l| l.value == "fail"),
+        "Challenge task results were not accepted",
+    )?;
+    response.proof().map(Next::Work).map_err(|_| {
+        crate::Error::new(
+            "MANAGED_WORK_UNSUPPORTED",
+            "Unrecognized follow-up declaration",
+        )
+    })
+}
+/// The current page's explicitly issued non-interactive completion navigation.
+pub fn issued_url(page: &str, config: &serde_json::Value) -> crate::Result<String> {
+    if config["cType"] != "non-interactive" || config["fa"].is_null() || config["fa"] == "" {
+        return Ok(page.into());
+    }
+    let path = crate::string(&config["fa"])?;
+    crate::require(
+        path.starts_with('/') && !path.starts_with("//"),
+        "Invalid issued completion path",
+    )?;
+    let before = crate::static_data::validate_url(page)?;
+    let after = before
+        .join(path)
+        .map_err(|_| crate::Error::new("INVALID_DATA", "Completion URL"))?;
+    let tokens = after
+        .query_pairs()
+        .filter(|(k, _)| k == "__cf_chl_f_tk")
+        .map(|(_, v)| v.into_owned())
+        .collect::<Vec<_>>();
+    let ordinary = |u: &url::Url| {
+        u.query_pairs()
+            .filter(|(k, _)| !k.starts_with("__cf_chl_"))
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect::<Vec<_>>()
+    };
+    crate::require(
+        before.origin() == after.origin()
+            && before.path() == after.path()
+            && ordinary(&before) == ordinary(&after)
+            && tokens.len() == 1
+            && crate::re(r"^[A-Za-z0-9_.-]{20,512}$").is_match(&tokens[0]),
+        "Issued completion does not belong to this page",
+    )?;
+    Ok(after.into())
+}

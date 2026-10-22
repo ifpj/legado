@@ -1,0 +1,61 @@
+{
+  "Bootstrap": [
+    "aliases",
+    "clock_fields"
+  ],
+  "ProgramData": [
+    "sha256",
+    "byte_length",
+    "code_length",
+    "strings"
+  ],
+  "ProgramFormat": [
+    "byte_offset",
+    "initial_key",
+    "state_step",
+    "state_multiplier",
+    "state_increment",
+    "hash_salt",
+    "char_xor",
+    "state_quadratic",
+    "char_mode"
+  ],
+  "DispatcherProfile": [
+    "opcode",
+    "register_slot",
+    "register_mask",
+    "hash_slots",
+    "target_slots",
+    "key_slot",
+    "key_mask",
+    "fnv_seed",
+    "prefix",
+    "digest_slots"
+  ],
+  "KeyMaterial": [
+    "helper",
+    "mask",
+    "program_sha256",
+    "literal_offset",
+    "literal_tag",
+    "literal_kind_slot"
+  ],
+  "ManagedPlan": [
+    "alphabet",
+    "modulus",
+    "flow_prefix",
+    "format",
+    "programs",
+    "replacements",
+    "build",
+    "key_material",
+    "bootstrap",
+    "dispatcher_profile",
+    "property_profile",
+    "immediate_profile",
+    "input_data_profile",
+    "integer_input_tag",
+    "declared_properties",
+    "compiledLayoutReused"
+  ]
+}

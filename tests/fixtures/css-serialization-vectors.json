@@ -1,0 +1,32 @@
+[
+  {
+    "source": ".feature { color:#abc; padding:0 2px; transform:translateX(0) rotate(0); }",
+    "cssRules": [
+      ".feature { color: rgb(170, 187, 204); padding: 0px 2px; transform: translateX(0px) rotate(0deg); }"
+    ]
+  },
+  {
+    "source": ".item{animation:spin .5s .2s linear infinite;box-shadow:inset 0 0 0 #123456;}",
+    "cssRules": [
+      ".item { animation: 0.5s linear 0.2s infinite normal none running spin; box-shadow: rgb(18, 52, 86) 0px 0px 0px inset; }"
+    ]
+  },
+  {
+    "source": "@media (prefers-color-scheme: dark){.feature{opacity:.9;background-color:#000}}",
+    "cssRules": [
+      "@media (prefers-color-scheme: dark) {\n  .feature { opacity: 0.9; background-color: rgb(0, 0, 0); }\n}"
+    ]
+  },
+  {
+    "source": "#item{border:solid #c44d0e;border-width:0 1px 1px 0;}",
+    "cssRules": [
+      "#item { border-style: solid; border-color: rgb(196, 77, 14); border-image: none; border-width: 0px 1px 1px 0px; }"
+    ]
+  },
+  {
+    "source": "@keyframes move{from{transform:translateY(0)}to{transform:translateY(3px)}}",
+    "cssRules": [
+      "@keyframes move { \n  0% { transform: translateY(0px); }\n  100% { transform: translateY(3px); }\n}"
+    ]
+  }
+]

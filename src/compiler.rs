@@ -1,0 +1,712 @@
+//! Recover the current protocol's finite data formats from its syntax.
+use crate::{
+    constants::{child, children, unwrap, Constant, Tables},
+    data::{program, Format, Plan},
+    re, require, Error, Result,
+};
+use base64::{engine::general_purpose::STANDARD, Engine};
+use serde_json::{json, Value};
+use std::collections::HashSet;
+use tree_sitter::{Node, Parser};
+
+pub fn integer<'a>(t: &Tables<'a>, n: Node<'a>) -> Result<i64> {
+    let value = t.value(n)?.number()?;
+    require(
+        value.is_finite() && value.abs() < (1u64 << 53) as f64,
+        "Static integer bounds",
+    )?;
+    Ok(value.trunc() as i64)
+}
+fn arithmetic(op: &str, a: i64, b: i64) -> Result<i64> {
+    Ok(match op {
+        "+" => a + b,
+        "-" => a - b,
+        "*" => a * b,
+        "&" => a & b,
+        "^" => a ^ b,
+        "|" => a | b,
+        ">>>" => ((a as u32) >> (b as u32 & 31)) as i64,
+        ">>" => ((a as i32) >> (b as u32 & 31)) as i64,
+        "<<" => (a as i32).wrapping_shl(b as u32 & 31) as i64,
+        ">=" => i64::from(a >= b),
+        "<" => i64::from(a < b),
+        "===" => i64::from(a == b),
+        "!==" => i64::from(a != b),
+        _ => {
+            return Err(Error::new(
+                "UNKNOWN_CONSTANT",
+                "Unsupported format operation",
+            ))
+        }
+    })
+}
+pub fn operation<'a>(t: &Tables<'a>, n: Node<'a>, op: &str) -> Option<[Node<'a>; 2]> {
+    let n = unwrap(n);
+    if n.kind() == "binary_expression" && child(n, "operator").is_ok_and(|n| t.text(n) == op) {
+        return Some([child(n, "left").ok()?, child(n, "right").ok()?]);
+    }
+    if n.kind() != "call_expression" {
+        return None;
+    }
+    let args = children(child(n, "arguments").ok()?);
+    if args.len() != 2 {
+        return None;
+    }
+    let fn_node = child(n, "function").ok()?;
+    let evaluated = t.value(fn_node);
+    let f = evaluated.ok()?;
+    let invoke = |a: i64, b: i64| {
+        t.invoke(
+            f.clone(),
+            vec![Constant::Number(a as f64), Constant::Number(b as f64)],
+            1,
+        )
+        .and_then(|v| {
+            if let Constant::Bool(v) = v {
+                Ok(i64::from(v))
+            } else {
+                v.integer()
+            }
+        })
+    };
+    let samples = [(3, 5), (7, 2), (255, 16), (-2147483648, 1)];
+    if samples
+        .iter()
+        .all(|(a, b)| invoke(*a, *b).ok() == arithmetic(op, *a, *b).ok())
+    {
+        Some([args[0], args[1]])
+    } else if samples
+        .iter()
+        .all(|(a, b)| invoke(*a, *b).ok() == arithmetic(op, *b, *a).ok())
+    {
+        Some([args[1], args[0]])
+    } else {
+        None
+    }
+}
+pub(crate) fn script_build(t: &Tables<'_>) -> Option<String> {
+    let mut values = HashSet::new();
+    for call in t
+        .all()
+        .iter()
+        .copied()
+        .into_iter()
+        .filter(|n| n.kind() == "call_expression")
+    {
+        let Some(function) = call.child_by_field_name("function") else {
+            continue;
+        };
+        if !matches!(
+            function.kind(),
+            "member_expression" | "subscript_expression"
+        ) {
+            continue;
+        }
+        let Some(arguments) = call.child_by_field_name("arguments") else {
+            continue;
+        };
+        let args = children(arguments);
+        if args.len() != 1 || t.value(args[0]).and_then(|v| v.integer()) != Ok(16) {
+            continue;
+        }
+        let method = function
+            .child_by_field_name("property")
+            .map(|n| t.text(n).to_string())
+            .or_else(|| {
+                function
+                    .child_by_field_name("index")
+                    .and_then(|n| t.value(n).ok()?.text().ok())
+            });
+        if method.as_deref() != Some("toString") {
+            continue;
+        }
+        if let Some(value) = function
+            .child_by_field_name("object")
+            .and_then(|n| t.value(n).ok()?.integer().ok())
+            .filter(|n| *n >= 0 && *n < (1i64 << 48))
+        {
+            values.insert(format!("{value:012x}"));
+        }
+    }
+    if values.len() == 1 {
+        values.into_iter().next()
+    } else {
+        None
+    }
+}
+pub(crate) fn transform_name(t: &Tables<'_>) -> Result<String> {
+    let mut candidates = HashSet::new();
+    for node in t
+        .all()
+        .iter()
+        .copied()
+        .into_iter()
+        .filter(|n| n.kind() == "assignment_expression")
+    {
+        let left = child(node, "left")?;
+        let right = unwrap(child(node, "right")?);
+        if left.kind() != "identifier" || right.kind() != "call_expression" {
+            continue;
+        }
+        let target = t.text(left);
+        let args = children(child(right, "arguments")?);
+        let function = child(right, "function")?;
+        let helper =
+            if args.len() == 1 && function.kind() == "identifier" && t.text(args[0]) == target {
+                Some(t.text(function).to_string())
+            } else {
+                let local = t.scope(right);
+                let globals = t.globals.borrow();
+                let identifiers = args
+                    .iter()
+                    .flat_map(|n| t.walk(*n, true))
+                    .filter(|n| n.kind() == "identifier")
+                    .map(|n| t.text(n))
+                    .collect::<HashSet<_>>();
+                if !identifiers.contains(target) {
+                    continue;
+                }
+                let unknown = identifiers
+                    .into_iter()
+                    .filter(|n| {
+                        !local.contains_key(*n)
+                            && !globals.contains_key(*n)
+                            && !matches!(*n, "undefined" | "Number" | "String" | "Math" | "Reflect")
+                            && *n != target
+                    })
+                    .collect::<HashSet<_>>();
+                if unknown.len() == 1 {
+                    unknown.into_iter().next().map(String::from)
+                } else {
+                    None
+                }
+            };
+        let Some(helper) = helper.filter(|s| (4..=64).contains(&s.len())) else {
+            continue;
+        };
+        let mut owner = node.parent();
+        while owner
+            .is_some_and(|n| !matches!(n.kind(), "function_declaration" | "function_expression"))
+        {
+            owner = owner.unwrap().parent();
+        }
+        let Some(owner) = owner else { continue };
+        for assignment in t
+            .walk(child(owner, "body")?, false)
+            .into_iter()
+            .filter(|n| n.kind() == "assignment_expression")
+        {
+            if t.text(child(assignment, "left")?) != target {
+                continue;
+            }
+            let value = unwrap(child(assignment, "right")?);
+            if value.kind() != "call_expression" {
+                continue;
+            }
+            let callee = child(value, "function")?;
+            let args = children(child(value, "arguments")?);
+            if !matches!(callee.kind(), "subscript_expression" | "member_expression")
+                || args.len() != 2
+            {
+                continue;
+            }
+            let prop = callee
+                .child_by_field_name("property")
+                .map(|n| t.text(n).to_string())
+                .or_else(|| {
+                    callee
+                        .child_by_field_name("index")
+                        .and_then(|n| t.value(n).ok()?.text().ok())
+                });
+            let (start, end) = (unwrap(args[0]), unwrap(args[1]));
+            if prop.as_deref() != Some("slice") || start.kind() != "identifier" {
+                continue;
+            }
+            if [0., 17., 255.].into_iter().all(|v| {
+                let mut env = t.scope(end);
+                env.insert(t.text(start).to_string(), Constant::Number(v));
+                t.eval(end, &mut env).and_then(|n| n.number()) == Ok(v + 16.)
+            }) {
+                candidates.insert(helper.clone());
+            }
+        }
+    }
+    require(candidates.len() == 1, "No unique wire-key transform")?;
+    Ok(candidates.into_iter().next().unwrap())
+}
+fn polynomial<'a>(t: &Tables<'a>, value: Node<'a>, name: &str) -> Result<(u8, u32, u32, u32)> {
+    let mut steps = HashSet::new();
+    for node in t.walk(value, true) {
+        if let Some(pair) = operation(t, node, "+") {
+            for [a, b] in [pair, [pair[1], pair[0]]] {
+                if t.text(unwrap(a)) == name {
+                    if let Ok(v) = integer(t, b) {
+                        steps.insert(v);
+                    }
+                }
+            }
+        }
+    }
+    require(
+        steps.len() == 1,
+        &format!(
+            "State polynomial opcode ambiguity: {} / {} / {:?}",
+            name,
+            t.text(value),
+            steps
+        ),
+    )?;
+    let step = *steps.iter().next().unwrap();
+    let scope = t.scope(value);
+    let mut values = Vec::new();
+    for x in 0..256i64 {
+        let mut scope = scope.clone();
+        scope.insert(name.into(), Constant::Number((x - step) as f64));
+        values.push(t.eval(value, &mut scope)?.integer()?)
+    }
+    let c = values[0];
+    let difference = (values[2] - 2 * values[1] + c) & 255;
+    require(difference & 1 == 0, "State polynomial parity")?;
+    let q = difference / 2;
+    let m = (values[1] - c - q) & 255;
+    require(
+        values
+            .iter()
+            .enumerate()
+            .all(|(i, v)| *v == (q * i as i64 * i as i64 + m * i as i64 + c) & 255),
+        "State polynomial verification",
+    )?;
+    // Recover the original coefficients when the source retains them. A
+    // reduced polynomial is byte-equivalent, but loses layout metadata.
+    if let Some(pair) = operation(t, value, "&") {
+        for [unmasked, mask] in [pair, [pair[1], pair[0]]] {
+            if integer(t, mask) != Ok(255) {
+                continue;
+            }
+            let evaluate = |x: i64| {
+                let mut env = scope.clone();
+                env.insert(name.into(), Constant::Number((x - step) as f64));
+                t.eval(unmasked, &mut env)?.integer()
+            };
+            if let (Ok(v0), Ok(v1), Ok(v2)) = (evaluate(0), evaluate(1), evaluate(2)) {
+                let full_q = (v2 - 2 * v1 + v0) / 2;
+                let full_m = v1 - v0 - full_q;
+                if full_q == 0
+                    && [full_m, v0]
+                        .iter()
+                        .all(|v| (0..=u32::MAX as i64).contains(v))
+                    && (0..8).all(|x| evaluate(x) == Ok(full_q * x * x + full_m * x + v0))
+                {
+                    return Ok((step as u8, full_m as u32, v0 as u32, full_q as u32));
+                }
+            }
+        }
+    }
+    Ok((step as u8, m as u32, c as u32, q as u32))
+}
+pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
+    let mut reasons = Vec::new();
+    for function in t.all().iter().copied().into_iter().filter(|n| {
+        n.kind() == "function_declaration"
+            && t.text(*n).contains("2654435769")
+            && t.text(*n).contains("return[]")
+            && t.text(*n).len() < 7000
+    }) {
+        let attempt = (|| -> Result<Format> {
+            let params = children(child(function, "parameters")?);
+            require(!params.is_empty(), "Reader parameter")?;
+            let param = t.text(params[0]);
+            let mut reader = None;
+            for arrow in t
+                .walk(function, true)
+                .into_iter()
+                .filter(|n| n.kind() == "arrow_function")
+            {
+                for expr in t.walk(child(arrow, "body")?, false) {
+                    let Some(pair) = operation(t, expr, "-") else {
+                        continue;
+                    };
+                    let left = unwrap(pair[0]);
+                    if left.kind() != "subscript_expression"
+                        || t.text(child(left, "object")?) != param
+                    {
+                        continue;
+                    }
+                    let Ok(offset) = integer(t, pair[1]) else {
+                        continue;
+                    };
+                    let mut returned = expr;
+                    while returned
+                        .parent()
+                        .is_some_and(|p| p.kind() != "return_statement")
+                    {
+                        returned = returned.parent().unwrap()
+                    }
+                    returned = unwrap(returned);
+                    if returned.kind() == "sequence_expression" {
+                        returned = unwrap(*children(returned).last().unwrap())
+                    }
+                    if let Some(pair) = operation(t, returned, "^") {
+                        if let Some(state) = pair
+                            .into_iter()
+                            .map(unwrap)
+                            .find(|n| n.kind() == "identifier")
+                        {
+                            if let Some(parent) =
+                                arrow.parent().filter(|p| p.kind() == "variable_declarator")
+                            {
+                                reader = Some((
+                                    t.text(child(parent, "name")?).to_string(),
+                                    t.text(state).to_string(),
+                                    offset,
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                }
+                if reader.is_some() {
+                    break;
+                }
+            }
+            let (reader, state, offset) =
+                reader.ok_or_else(|| Error::new("UNKNOWN_CONSTANT", "Data reader identity"))?;
+            require((0..=255).contains(&offset), "Data byte offset")?;
+            let mut seeds = HashSet::new();
+            let mut transition = None;
+            let mut transition_errors = Vec::new();
+            for node in t.walk(function, false) {
+                if !matches!(node.kind(), "assignment_expression" | "variable_declarator") {
+                    continue;
+                }
+                let target = child(
+                    node,
+                    if node.kind() == "assignment_expression" {
+                        "left"
+                    } else {
+                        "name"
+                    },
+                )?;
+                if t.text(target) != state {
+                    continue;
+                }
+                let Some(value) =
+                    node.child_by_field_name(if node.kind() == "assignment_expression" {
+                        "right"
+                    } else {
+                        "value"
+                    })
+                else {
+                    continue;
+                };
+                if let Ok(value) = integer(t, value) {
+                    seeds.insert(value);
+                } else {
+                    match polynomial(t, value, &state) {
+                        Ok(profile) => transition = Some(profile),
+                        Err(error) => transition_errors.push(error.message),
+                    }
+                }
+            }
+            require(
+                seeds.len() == 1 && transition.is_some(),
+                &format!(
+                    "Data seed/transition: seeds={}, transition={}, errors={:?}",
+                    seeds.len(),
+                    transition.is_some(),
+                    transition_errors
+                ),
+            )?;
+            let mut salts = HashSet::new();
+            for node in t.walk(function, true) {
+                if let Some(pair) = operation(t, node, "^") {
+                    for [a, b] in [pair, [pair[1], pair[0]]] {
+                        if unwrap(b).kind() == "identifier" {
+                            if let Ok(v) = integer(t, a) {
+                                if (65536..(1i64 << 32)).contains(&v) && v != 2654435769 {
+                                    salts.insert(v);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            require(
+                salts.len() == 1,
+                &format!("Character hash salt ambiguity: {:?}", salts),
+            )?;
+            let mut xors = HashSet::new();
+            let mut after = false;
+            for arrow in t
+                .walk(function, true)
+                .into_iter()
+                .filter(|n| n.kind() == "arrow_function" && t.text(*n).contains("2654435769"))
+            {
+                for expr in t.walk(arrow, true) {
+                    if let Some(pair) = operation(t, expr, "^") {
+                        for [a, b] in [pair, [pair[1], pair[0]]] {
+                            if t.walk(a, true)
+                                .iter()
+                                .any(|n| n.kind() == "identifier" && t.text(*n) == reader)
+                            {
+                                if let Ok(v) = integer(t, b) {
+                                    if (0..=255).contains(&v) {
+                                        xors.insert(v);
+                                    }
+                                }
+                                if t.walk(a, true)
+                                    .iter()
+                                    .any(|n| operation(t, *n, "-").is_some())
+                                    && t.walk(b, true)
+                                        .iter()
+                                        .any(|n| operation(t, *n, ">>>").is_some())
+                                {
+                                    after = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            require(xors.len() == 1, "Character XOR ambiguity")?;
+            let (step, mult, increment, q) = transition.unwrap();
+            Ok(Format {
+                byte_offset: offset as u8,
+                initial_key: *seeds.iter().next().unwrap() as u8,
+                state_step: step,
+                state_multiplier: mult,
+                state_increment: increment,
+                state_quadratic: q,
+                hash_salt: *salts.iter().next().unwrap() as u32,
+                char_xor: *xors.iter().next().unwrap() as u8,
+                char_mode: if after {
+                    "after-subtract"
+                } else {
+                    "before-subtract"
+                }
+                .into(),
+            })
+        })();
+        match attempt {
+            Ok(value) => return Ok(value),
+            Err(error) => reasons.push(error.message),
+        }
+    }
+    Err(Error {
+        details: json!({"candidateErrors":reasons}),
+        ..Error::new("MANAGED_FORMAT_UNSUPPORTED", "未能静态恢复当前数据格式")
+    })
+}
+pub(crate) fn key_material(t: &Tables<'_>, encoded: &str, f: &Format) -> Result<Value> {
+    // Every helper candidate is a current source identifier, and must have
+    // a verified adjacent 16-byte literal under the rolling instruction key.
+    let name = transform_name(t)?;
+    let names = HashSet::from([name.as_str()]);
+    recover_material(encoded, f, &names)
+}
+pub(crate) fn recover_material(encoded: &str, f: &Format, names: &HashSet<&str>) -> Result<Value> {
+    let raw = STANDARD.decode(encoded)?;
+    let p = program(&raw, f, false)?;
+    let short = |position, key, len| short_literal(&raw, position, key, f, len);
+    let mut found = Vec::new();
+    let mut lengths = names
+        .iter()
+        .map(|name| name.len())
+        .filter(|n| (4..=64).contains(n))
+        .collect::<Vec<_>>();
+    lengths.sort_unstable();
+    lengths.dedup();
+    for position in 3..p.code_length.saturating_sub(90) {
+        for &len in &lengths {
+            let key = f.byte(raw[position], len as u8);
+            let Some(name) = short(position, key, len).and_then(|n| String::from_utf8(n).ok())
+            else {
+                continue;
+            };
+            if !names.contains(name.as_str()) {
+                continue;
+            }
+            let next = position + len + 1;
+            let opcode = f.byte(raw[next], key);
+            let next_key = f.key(key, opcode);
+            let Some(mask) = short(next + 3, next_key, 16) else {
+                continue;
+            };
+            if !mask.iter().all(|c| (33..=126).contains(c)) {
+                continue;
+            }
+            for slot in 1..=2 {
+                let tag = f.byte(raw[position - 3 + slot], key);
+                if tag == f.byte(raw[next + slot], next_key) {
+                    found.push(json!({"helper":name,"mask":mask,"program_sha256":p.sha256,"literal_offset":next+3,"literal_tag":tag,"literal_kind_slot":slot}))
+                }
+            }
+        }
+    }
+    require(found.len() == 1, "Adjacent key mask missing or ambiguous")?;
+    Ok(found.remove(0))
+}
+pub fn compile(source: &str, frame: bool) -> Result<Plan> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .map_err(|e| Error::new("PARSER_ERROR", e.to_string()))?;
+    let tree = parser
+        .parse(source, None)
+        .ok_or_else(|| Error::new("PARSER_ERROR", "Script parse failed"))?;
+    require(
+        !tree.root_node().has_error(),
+        "Challenge syntax unsupported",
+    )?;
+    let tables = Tables::new(tree.root_node(), source)?;
+    let values = tables.strings();
+    let f = format(&tables)?;
+    let one = |pattern: &str| -> Result<String> {
+        let found: HashSet<_> = values
+            .iter()
+            .filter(|v| re(pattern).is_match(v))
+            .cloned()
+            .collect();
+        require(found.len() == 1, "Wire parameter ambiguous")?;
+        Ok(found.into_iter().next().unwrap())
+    };
+    let alphabet = one(r"^[A-Za-z0-9+$-]{65}$")?;
+    let modulus = one(r"^0x[0-9a-fA-F]{258}$")?;
+    let flow = one(r"^/fo/[0-9]+:[0-9]+:[A-Za-z0-9_-]+/$")?;
+    let mut material = Vec::new();
+    let mut programs = Vec::new();
+    for value in &values {
+        if value.len() > 64 && re(r"^[A-Za-z0-9+/]+={0,2}$").is_match(value) {
+            if let Ok(raw) = STANDARD.decode(value) {
+                if let Ok(p) = program(&raw, &f, false) {
+                    if let Ok(k) = key_material(&tables, value, &f) {
+                        if !material
+                            .iter()
+                            .any(|m: &Value| m["program_sha256"] == k["program_sha256"])
+                        {
+                            material.push(k);
+                            programs.push(json!(p));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    require(material.len() == 1, "Initializer key source ambiguous")?;
+    let build = script_build(&tables)
+        .ok_or_else(|| Error::new("UNSUPPORTED_FORMAT", "Protocol build missing"))?;
+    let mut meta = json!({"format":serde_json::to_value(&f)?,"key_material":material.remove(0),"programs":programs,"build":build,"bootstrap":null,"dispatcher_profile":null,"property_profile":null,"immediate_profile":null,"input_data_profile":null,"integer_input_tag":null,"declared_properties":null});
+    if frame {
+        use crate::compiler_profiles as profiles;
+        meta["dispatcher_profile"] = profiles::dispatcher(&tables, &f)?;
+        meta["property_profile"] = profiles::properties(&tables, &f)?;
+        meta["immediate_profile"] = profiles::immediate(&tables, &f)?;
+        meta["input_data_profile"] = profiles::inputs(&tables, &f)?;
+        if let Ok((opcode, salt)) = profiles::framed_salt(&tables) {
+            meta["input_data_profile"]["flow-call"] = json!([opcode,[],{"salt":salt}]);
+        }
+        meta["integer_input_tag"] = json!(profiles::integer_tag(&tables, &f)?);
+        meta["input_data_profile"]["flow-dispatch"] =
+            json!([meta["dispatcher_profile"]["opcode"], vec![0; 25], {}]);
+        meta["declared_properties"] = declarations(&tables)?;
+    }
+    Ok(Plan {
+        format: f,
+        meta,
+        alphabet,
+        modulus,
+        flow,
+    })
+}
+pub(crate) fn constant_json(v: Constant<'_>) -> Option<Value> {
+    match v {
+        Constant::Number(n) => serde_json::Number::from_f64(n).map(Value::Number),
+        Constant::Text(s) => Some(json!(s)),
+        Constant::Bool(b) => Some(json!(b)),
+        Constant::Null => Some(Value::Null),
+        Constant::Array(items) => items
+            .into_iter()
+            .map(constant_json)
+            .collect::<Option<Vec<_>>>()
+            .map(Value::Array),
+        _ => None,
+    }
+}
+
+pub(crate) fn short_literal(
+    raw: &[u8],
+    position: usize,
+    key: u8,
+    f: &Format,
+    length: usize,
+) -> Option<Vec<u8>> {
+    if !(1..127).contains(&length)
+        || position.checked_add(length)? >= raw.len()
+        || f.byte(raw[position], key) as usize != length
+    {
+        return None;
+    }
+    let mut seed = f.seed(position + 1);
+    Some(
+        raw[position + 1..position + 1 + length]
+            .iter()
+            .map(|b| {
+                let v = f.char(f.byte(*b, key), seed);
+                seed = seed.wrapping_add(2654435769);
+                v
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn declarations(t: &Tables<'_>) -> Result<Value> {
+    let assignments: Vec<_> = t
+        .all()
+        .iter()
+        .copied()
+        .into_iter()
+        .filter(|n| n.kind() == "assignment_expression")
+        .collect();
+    let mut aliases = HashSet::from(["window".to_string(), "self".to_string()]);
+    for node in &assignments {
+        let left = unwrap(child(*node, "left")?);
+        let right = unwrap(child(*node, "right")?);
+        if left.kind() == "subscript_expression"
+            && matches!(right.kind(), "function_expression" | "arrow_function")
+        {
+            if t.value(child(left, "index")?)
+                .and_then(|v| v.text())
+                .is_ok_and(|v| v == "vUAjb0")
+            {
+                aliases.insert(t.text(child(left, "object")?).into());
+            }
+        }
+    }
+    let mut declarations = serde_json::Map::new();
+    for node in assignments {
+        let left = unwrap(child(node, "left")?);
+        let right = unwrap(child(node, "right")?);
+        if !matches!(left.kind(), "member_expression" | "subscript_expression")
+            || !aliases.contains(t.text(child(left, "object")?))
+        {
+            continue;
+        }
+        let key = if let Some(n) = left.child_by_field_name("property") {
+            t.text(n).to_string()
+        } else {
+            let Ok(key) = t.value(child(left, "index")?).and_then(|v| v.text()) else {
+                continue;
+            };
+            key
+        };
+        let value = match right.kind() {
+            "function_expression" | "arrow_function" => Some(json!({"declarationKind":"N"})),
+            "object" => Some(json!({"declarationKind":"o"})),
+            _ => t.value(right).ok().and_then(constant_json),
+        };
+        if let Some(value) = value {
+            declarations.insert(key, value);
+        }
+    }
+    Ok(json!(declarations))
+}

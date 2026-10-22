@@ -1,0 +1,12 @@
+services:
+  cf-gateway:
+    image: ghcr.io/ifpj/cf-gateway:latest
+    ports:
+      - "19686:19686"
+    environment:
+      CF_GATEWAY_TOKEN: ${CF_GATEWAY_TOKEN:-}
+      CF_GATEWAY_TIMEZONE: Asia/Shanghai
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
