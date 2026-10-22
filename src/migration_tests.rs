@@ -1105,6 +1105,109 @@ fn close(a: &Value, b: &Value) -> bool {
         _ => false,
     }
 }
+fn approximate_math_positions() -> &'static Vec<bool> {
+    static POSITIONS: OnceLock<Vec<bool>> = OnceLock::new();
+    POSITIONS.get_or_init(|| {
+        let plan: Value =
+            serde_json::from_str(include_str!("../profiles/math-plan-v1.json")).unwrap();
+        let mut out = Vec::new();
+        for case in plan["cases"].as_array().unwrap() {
+            let name = case[0].as_str().unwrap();
+            out.push(!matches!(
+                name,
+                "abs" | "ceil" | "clz32" | "floor" | "fround" | "round" | "sign" | "sqrt" | "trunc"
+            ));
+            if plan["polyfills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == name)
+            {
+                out.push(true);
+            }
+        }
+        out
+    })
+}
+fn numeric_math_string_close(a: &Value, b: &Value) -> bool {
+    if a == b {
+        return true;
+    }
+    let (Some(a), Some(b)) = (a.as_str(), b.as_str()) else {
+        return false;
+    };
+    let (Ok(x), Ok(y)) = (a.parse::<f64>(), b.parse::<f64>()) else {
+        return false;
+    };
+    // The host CRT/libm transcendental functions need not return identical
+    // last bits across platforms. This exception is scoped to the declared
+    // approximate math outputs, not protocol tokens or number formatting.
+    x.is_finite()
+        && y.is_finite()
+        && x.is_sign_negative() == y.is_sign_negative()
+        && math::number(x) == a
+        && math::number(y) == b
+        && x.to_bits().abs_diff(y.to_bits()) <= 4
+}
+fn math_result_close(a: &Value, b: &Value) -> bool {
+    if a == b {
+        return true;
+    }
+    if let (Some(a), Some(b)) = (a.as_object(), b.as_object()) {
+        return a.len() == b.len()
+            && a.iter().all(|(key, value)| {
+                b.get(key).is_some_and(|other| {
+                    if key == "zJGo6" {
+                        let (Some(a), Some(b)) = (value.as_array(), other.as_array()) else {
+                            return false;
+                        };
+                        let positions = approximate_math_positions();
+                        a.len() == b.len()
+                            && a.len() == positions.len()
+                            && a.iter().zip(b).zip(positions).all(|((a, b), approx)| {
+                                if *approx {
+                                    numeric_math_string_close(a, b)
+                                } else {
+                                    a == b
+                                }
+                            })
+                    } else {
+                        math_result_close(value, other)
+                    }
+                })
+            });
+    }
+    close(a, b)
+}
+#[test]
+fn math_contract_roundoff_exception_is_narrow_and_preserves_wire_strings() {
+    let near = f64::from_bits(1.0f64.to_bits() + 1);
+    assert!(numeric_math_string_close(
+        &json!("1"),
+        &json!(math::number(near))
+    ));
+    assert!(!numeric_math_string_close(
+        &json!("1"),
+        &json!(math::number(f64::from_bits(1.0f64.to_bits() + 5)))
+    ));
+    assert!(!numeric_math_string_close(&json!("1"), &json!("1.0")));
+    assert!(!numeric_math_string_close(&json!("0"), &json!("-0")));
+    assert!(!numeric_math_string_close(
+        &json!("NaN"),
+        &json!("Infinity")
+    ));
+    assert!(!math_result_close(
+        &json!({"token":"1"}),
+        &json!({"token":math::number(near)})
+    ));
+    let positions = approximate_math_positions();
+    let mut a = json!({"zJGo6":vec!["1";positions.len()]});
+    let mut b = a.clone();
+    b["zJGo6"][positions.iter().position(|p| *p).unwrap()] = json!(math::number(near));
+    assert!(math_result_close(&a, &b));
+    a["zJGo6"][positions.iter().position(|p| !*p).unwrap()] = json!("2");
+    assert!(!math_result_close(&a, &b));
+}
 fn cases() -> &'static Vec<Value> {
     static CASES: OnceLock<Vec<Value>> = OnceLock::new();
     CASES.get_or_init(|| {
@@ -1200,7 +1303,17 @@ fn deterministic_python_contracts() {
             }
         }
         let success = match &got {
-            Ok(Ok(v)) => row.get("error").is_none() && close(v, &expected),
+            Ok(Ok(v)) => {
+                row.get("error").is_none()
+                    && if matches!(
+                        op,
+                        "cf_gateway.math_task.calculate" | "cf_gateway.math_task.math_tasks"
+                    ) {
+                        math_result_close(v, &expected)
+                    } else {
+                        close(v, &expected)
+                    }
+            }
             Ok(Err(e)) => {
                 row.get("error").is_some() && e.code != "TEST_INPUT" && e.code != "TEST_UNSUPPORTED"
             }
