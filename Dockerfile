@@ -4,6 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake clang libclang-dev nasm pkg-config libicu-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
+RUN rustup component add rustfmt
 ENV CARGO_BUILD_JOBS=2 LANG=en_US.UTF-8 TZ=Asia/Shanghai
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
