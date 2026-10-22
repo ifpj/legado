@@ -1,0 +1,2176 @@
+{
+  "description": "Public locale-format regression operands, independent of website challenges. Original production ICU4C comparison: 106/109 identical rows. Three Japanese America/Eastern date labels use verified CLDR 48 naming.",
+  "cldrReference": "https://github.com/unicode-org/cldr/blob/release-48/common/main/ja.xml",
+  "cases": [
+    {
+      "args": [
+        "zh-CN",
+        "Asia/Shanghai",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "十二月 中国标准时间",
+        "NzGy3": "法语（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "21,000万亿"
+      }
+    },
+    {
+      "args": [
+        "zh-CN",
+        "Asia/Shanghai",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "一月 中国标准时间",
+        "NzGy3": "法语（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "2100"
+      }
+    },
+    {
+      "args": [
+        "zh-CN",
+        "Asia/Shanghai",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "七月 中国标准时间",
+        "NzGy3": "法语（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "100万"
+      }
+    },
+    {
+      "args": [
+        "zh-CN",
+        "UTC",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "十二月 协调世界时",
+        "NzGy3": "法语（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "21,000万亿"
+      }
+    },
+    {
+      "args": [
+        "zh-CN",
+        "UTC",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "一月 协调世界时",
+        "NzGy3": "法语（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "2100"
+      }
+    },
+    {
+      "args": [
+        "zh-CN",
+        "UTC",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "七月 协调世界时",
+        "NzGy3": "法语（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "100万"
+      }
+    },
+    {
+      "args": [
+        "zh-CN",
+        "America/New_York",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "十二月 北美东部标准时间",
+        "NzGy3": "法语（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "21,000万亿"
+      }
+    },
+    {
+      "args": [
+        "zh-CN",
+        "America/New_York",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "十二月 北美东部标准时间",
+        "NzGy3": "法语（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "2100"
+      }
+    },
+    {
+      "args": [
+        "zh-CN",
+        "America/New_York",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "六月 北美东部夏令时间",
+        "NzGy3": "法语（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "100万"
+      }
+    },
+    {
+      "args": [
+        "zh-CN",
+        "Europe/Berlin",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "十二月 中欧标准时间",
+        "NzGy3": "法语（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "21,000万亿"
+      }
+    },
+    {
+      "args": [
+        "zh-CN",
+        "Europe/Berlin",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "一月 中欧标准时间",
+        "NzGy3": "法语（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "2100"
+      }
+    },
+    {
+      "args": [
+        "zh-CN",
+        "Europe/Berlin",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "七月 中欧夏令时间",
+        "NzGy3": "法语（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "100万"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "Asia/Shanghai",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "December China Standard Time",
+        "NzGy3": "French (Canada)",
+        "FNvn2": "one, two, or three",
+        "HxIG7": "21,000 trillion"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "Asia/Shanghai",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "January China Standard Time",
+        "NzGy3": "French (Canada)",
+        "FNvn2": "one, two, or three",
+        "HxIG7": "2.1 thousand"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "Asia/Shanghai",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "July China Standard Time",
+        "NzGy3": "French (Canada)",
+        "FNvn2": "one, two, or three",
+        "HxIG7": "1 million"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "UTC",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "December Coordinated Universal Time",
+        "NzGy3": "French (Canada)",
+        "FNvn2": "one, two, or three",
+        "HxIG7": "21,000 trillion"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "UTC",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "January Coordinated Universal Time",
+        "NzGy3": "French (Canada)",
+        "FNvn2": "one, two, or three",
+        "HxIG7": "2.1 thousand"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "UTC",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "July Coordinated Universal Time",
+        "NzGy3": "French (Canada)",
+        "FNvn2": "one, two, or three",
+        "HxIG7": "1 million"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "America/New_York",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "December Eastern Standard Time",
+        "NzGy3": "French (Canada)",
+        "FNvn2": "one, two, or three",
+        "HxIG7": "21,000 trillion"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "America/New_York",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "December Eastern Standard Time",
+        "NzGy3": "French (Canada)",
+        "FNvn2": "one, two, or three",
+        "HxIG7": "2.1 thousand"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "America/New_York",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "June Eastern Daylight Time",
+        "NzGy3": "French (Canada)",
+        "FNvn2": "one, two, or three",
+        "HxIG7": "1 million"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "Europe/Berlin",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "December Central European Standard Time",
+        "NzGy3": "French (Canada)",
+        "FNvn2": "one, two, or three",
+        "HxIG7": "21,000 trillion"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "Europe/Berlin",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "January Central European Standard Time",
+        "NzGy3": "French (Canada)",
+        "FNvn2": "one, two, or three",
+        "HxIG7": "2.1 thousand"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "Europe/Berlin",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "July Central European Summer Time",
+        "NzGy3": "French (Canada)",
+        "FNvn2": "one, two, or three",
+        "HxIG7": "1 million"
+      }
+    },
+    {
+      "args": [
+        "zh-TW",
+        "Asia/Shanghai",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "12月 中國標準時間",
+        "NzGy3": "法文（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "21,000兆"
+      }
+    },
+    {
+      "args": [
+        "zh-TW",
+        "Asia/Shanghai",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "1月 中國標準時間",
+        "NzGy3": "法文（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "2100"
+      }
+    },
+    {
+      "args": [
+        "zh-TW",
+        "Asia/Shanghai",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "7月 中國標準時間",
+        "NzGy3": "法文（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "100萬"
+      }
+    },
+    {
+      "args": [
+        "zh-TW",
+        "UTC",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "12月 世界標準時間",
+        "NzGy3": "法文（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "21,000兆"
+      }
+    },
+    {
+      "args": [
+        "zh-TW",
+        "UTC",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "1月 世界標準時間",
+        "NzGy3": "法文（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "2100"
+      }
+    },
+    {
+      "args": [
+        "zh-TW",
+        "UTC",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "7月 世界標準時間",
+        "NzGy3": "法文（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "100萬"
+      }
+    },
+    {
+      "args": [
+        "zh-TW",
+        "America/New_York",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "12月 東部標準時間",
+        "NzGy3": "法文（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "21,000兆"
+      }
+    },
+    {
+      "args": [
+        "zh-TW",
+        "America/New_York",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "12月 東部標準時間",
+        "NzGy3": "法文（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "2100"
+      }
+    },
+    {
+      "args": [
+        "zh-TW",
+        "America/New_York",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "6月 東部夏令時間",
+        "NzGy3": "法文（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "100萬"
+      }
+    },
+    {
+      "args": [
+        "zh-TW",
+        "Europe/Berlin",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "12月 中歐標準時間",
+        "NzGy3": "法文（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "21,000兆"
+      }
+    },
+    {
+      "args": [
+        "zh-TW",
+        "Europe/Berlin",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "1月 中歐標準時間",
+        "NzGy3": "法文（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "2100"
+      }
+    },
+    {
+      "args": [
+        "zh-TW",
+        "Europe/Berlin",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "7月 中歐夏令時間",
+        "NzGy3": "法文（加拿大）",
+        "FNvn2": "one、two或three",
+        "HxIG7": "100萬"
+      }
+    },
+    {
+      "args": [
+        "fr-FR",
+        "Asia/Shanghai",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "décembre heure normale de la Chine",
+        "NzGy3": "français (Canada)",
+        "FNvn2": "one, two ou three",
+        "HxIG7": "21 000 billions"
+      }
+    },
+    {
+      "args": [
+        "fr-FR",
+        "Asia/Shanghai",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "janvier heure normale de la Chine",
+        "NzGy3": "français (Canada)",
+        "FNvn2": "one, two ou three",
+        "HxIG7": "2,1 mille"
+      }
+    },
+    {
+      "args": [
+        "fr-FR",
+        "Asia/Shanghai",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "juillet heure normale de la Chine",
+        "NzGy3": "français (Canada)",
+        "FNvn2": "one, two ou three",
+        "HxIG7": "1 million"
+      }
+    },
+    {
+      "args": [
+        "fr-FR",
+        "UTC",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "décembre temps universel coordonné",
+        "NzGy3": "français (Canada)",
+        "FNvn2": "one, two ou three",
+        "HxIG7": "21 000 billions"
+      }
+    },
+    {
+      "args": [
+        "fr-FR",
+        "UTC",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "janvier temps universel coordonné",
+        "NzGy3": "français (Canada)",
+        "FNvn2": "one, two ou three",
+        "HxIG7": "2,1 mille"
+      }
+    },
+    {
+      "args": [
+        "fr-FR",
+        "UTC",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "juillet temps universel coordonné",
+        "NzGy3": "français (Canada)",
+        "FNvn2": "one, two ou three",
+        "HxIG7": "1 million"
+      }
+    },
+    {
+      "args": [
+        "fr-FR",
+        "America/New_York",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "décembre heure normale de l’Est nord-américain",
+        "NzGy3": "français (Canada)",
+        "FNvn2": "one, two ou three",
+        "HxIG7": "21 000 billions"
+      }
+    },
+    {
+      "args": [
+        "fr-FR",
+        "America/New_York",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "décembre heure normale de l’Est nord-américain",
+        "NzGy3": "français (Canada)",
+        "FNvn2": "one, two ou three",
+        "HxIG7": "2,1 mille"
+      }
+    },
+    {
+      "args": [
+        "fr-FR",
+        "America/New_York",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "juin heure d’été de l’Est nord-américain",
+        "NzGy3": "français (Canada)",
+        "FNvn2": "one, two ou three",
+        "HxIG7": "1 million"
+      }
+    },
+    {
+      "args": [
+        "fr-FR",
+        "Europe/Berlin",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "décembre heure normale d’Europe centrale",
+        "NzGy3": "français (Canada)",
+        "FNvn2": "one, two ou three",
+        "HxIG7": "21 000 billions"
+      }
+    },
+    {
+      "args": [
+        "fr-FR",
+        "Europe/Berlin",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "janvier heure normale d’Europe centrale",
+        "NzGy3": "français (Canada)",
+        "FNvn2": "one, two ou three",
+        "HxIG7": "2,1 mille"
+      }
+    },
+    {
+      "args": [
+        "fr-FR",
+        "Europe/Berlin",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "juillet heure d’été d’Europe centrale",
+        "NzGy3": "français (Canada)",
+        "FNvn2": "one, two ou three",
+        "HxIG7": "1 million"
+      }
+    },
+    {
+      "args": [
+        "de-DE",
+        "Asia/Shanghai",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "Dezember Chinesische Normalzeit",
+        "NzGy3": "Französisch (Kanada)",
+        "FNvn2": "one, two oder three",
+        "HxIG7": "21.000 Billionen"
+      }
+    },
+    {
+      "args": [
+        "de-DE",
+        "Asia/Shanghai",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "Januar Chinesische Normalzeit",
+        "NzGy3": "Französisch (Kanada)",
+        "FNvn2": "one, two oder three",
+        "HxIG7": "2,1 Tausend"
+      }
+    },
+    {
+      "args": [
+        "de-DE",
+        "Asia/Shanghai",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "Juli Chinesische Normalzeit",
+        "NzGy3": "Französisch (Kanada)",
+        "FNvn2": "one, two oder three",
+        "HxIG7": "1 Million"
+      }
+    },
+    {
+      "args": [
+        "de-DE",
+        "UTC",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "Dezember Koordinierte Weltzeit",
+        "NzGy3": "Französisch (Kanada)",
+        "FNvn2": "one, two oder three",
+        "HxIG7": "21.000 Billionen"
+      }
+    },
+    {
+      "args": [
+        "de-DE",
+        "UTC",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "Januar Koordinierte Weltzeit",
+        "NzGy3": "Französisch (Kanada)",
+        "FNvn2": "one, two oder three",
+        "HxIG7": "2,1 Tausend"
+      }
+    },
+    {
+      "args": [
+        "de-DE",
+        "UTC",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "Juli Koordinierte Weltzeit",
+        "NzGy3": "Französisch (Kanada)",
+        "FNvn2": "one, two oder three",
+        "HxIG7": "1 Million"
+      }
+    },
+    {
+      "args": [
+        "de-DE",
+        "America/New_York",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "Dezember Nordamerikanische Ostküsten-Normalzeit",
+        "NzGy3": "Französisch (Kanada)",
+        "FNvn2": "one, two oder three",
+        "HxIG7": "21.000 Billionen"
+      }
+    },
+    {
+      "args": [
+        "de-DE",
+        "America/New_York",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "Dezember Nordamerikanische Ostküsten-Normalzeit",
+        "NzGy3": "Französisch (Kanada)",
+        "FNvn2": "one, two oder three",
+        "HxIG7": "2,1 Tausend"
+      }
+    },
+    {
+      "args": [
+        "de-DE",
+        "America/New_York",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "Juni Nordamerikanische Ostküsten-Sommerzeit",
+        "NzGy3": "Französisch (Kanada)",
+        "FNvn2": "one, two oder three",
+        "HxIG7": "1 Million"
+      }
+    },
+    {
+      "args": [
+        "de-DE",
+        "Europe/Berlin",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "Dezember Mitteleuropäische Normalzeit",
+        "NzGy3": "Französisch (Kanada)",
+        "FNvn2": "one, two oder three",
+        "HxIG7": "21.000 Billionen"
+      }
+    },
+    {
+      "args": [
+        "de-DE",
+        "Europe/Berlin",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "Januar Mitteleuropäische Normalzeit",
+        "NzGy3": "Französisch (Kanada)",
+        "FNvn2": "one, two oder three",
+        "HxIG7": "2,1 Tausend"
+      }
+    },
+    {
+      "args": [
+        "de-DE",
+        "Europe/Berlin",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "Juli Mitteleuropäische Sommerzeit",
+        "NzGy3": "Französisch (Kanada)",
+        "FNvn2": "one, two oder three",
+        "HxIG7": "1 Million"
+      }
+    },
+    {
+      "args": [
+        "ja-JP",
+        "Asia/Shanghai",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "12月 中国標準時",
+        "NzGy3": "フランス語 (カナダ)",
+        "FNvn2": "one、two、またはthree",
+        "HxIG7": "2.1京"
+      }
+    },
+    {
+      "args": [
+        "ja-JP",
+        "Asia/Shanghai",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "1月 中国標準時",
+        "NzGy3": "フランス語 (カナダ)",
+        "FNvn2": "one、two、またはthree",
+        "HxIG7": "2100"
+      }
+    },
+    {
+      "args": [
+        "ja-JP",
+        "Asia/Shanghai",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "7月 中国標準時",
+        "NzGy3": "フランス語 (カナダ)",
+        "FNvn2": "one、two、またはthree",
+        "HxIG7": "100万"
+      }
+    },
+    {
+      "args": [
+        "ja-JP",
+        "UTC",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "12月 協定世界時",
+        "NzGy3": "フランス語 (カナダ)",
+        "FNvn2": "one、two、またはthree",
+        "HxIG7": "2.1京"
+      }
+    },
+    {
+      "args": [
+        "ja-JP",
+        "UTC",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "1月 協定世界時",
+        "NzGy3": "フランス語 (カナダ)",
+        "FNvn2": "one、two、またはthree",
+        "HxIG7": "2100"
+      }
+    },
+    {
+      "args": [
+        "ja-JP",
+        "UTC",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "7月 協定世界時",
+        "NzGy3": "フランス語 (カナダ)",
+        "FNvn2": "one、two、またはthree",
+        "HxIG7": "100万"
+      }
+    },
+    {
+      "args": [
+        "ja-JP",
+        "America/New_York",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "12月 米国東部標準時",
+        "NzGy3": "フランス語 (カナダ)",
+        "FNvn2": "one、two、またはthree",
+        "HxIG7": "2.1京"
+      },
+      "previousSystemIcuDate": "12月 アメリカ東部標準時"
+    },
+    {
+      "args": [
+        "ja-JP",
+        "America/New_York",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "12月 米国東部標準時",
+        "NzGy3": "フランス語 (カナダ)",
+        "FNvn2": "one、two、またはthree",
+        "HxIG7": "2100"
+      },
+      "previousSystemIcuDate": "12月 アメリカ東部標準時"
+    },
+    {
+      "args": [
+        "ja-JP",
+        "America/New_York",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "6月 米国東部夏時間",
+        "NzGy3": "フランス語 (カナダ)",
+        "FNvn2": "one、two、またはthree",
+        "HxIG7": "100万"
+      },
+      "previousSystemIcuDate": "6月 アメリカ東部夏時間"
+    },
+    {
+      "args": [
+        "ja-JP",
+        "Europe/Berlin",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "12月 中央ヨーロッパ標準時",
+        "NzGy3": "フランス語 (カナダ)",
+        "FNvn2": "one、two、またはthree",
+        "HxIG7": "2.1京"
+      }
+    },
+    {
+      "args": [
+        "ja-JP",
+        "Europe/Berlin",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "1月 中央ヨーロッパ標準時",
+        "NzGy3": "フランス語 (カナダ)",
+        "FNvn2": "one、two、またはthree",
+        "HxIG7": "2100"
+      }
+    },
+    {
+      "args": [
+        "ja-JP",
+        "Europe/Berlin",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "7月 中央ヨーロッパ夏時間",
+        "NzGy3": "フランス語 (カナダ)",
+        "FNvn2": "one、two、またはthree",
+        "HxIG7": "100万"
+      }
+    },
+    {
+      "args": [
+        "ar-EG",
+        "Asia/Shanghai",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "ديسمبر توقيت الصين الرسمي",
+        "NzGy3": "الفرنسية (كندا)",
+        "FNvn2": "one أو two أو three",
+        "HxIG7": "٢١٬٠٠٠ ترليون"
+      }
+    },
+    {
+      "args": [
+        "ar-EG",
+        "Asia/Shanghai",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "يناير توقيت الصين الرسمي",
+        "NzGy3": "الفرنسية (كندا)",
+        "FNvn2": "one أو two أو three",
+        "HxIG7": "٢٫١ ألف"
+      }
+    },
+    {
+      "args": [
+        "ar-EG",
+        "Asia/Shanghai",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "يوليو توقيت الصين الرسمي",
+        "NzGy3": "الفرنسية (كندا)",
+        "FNvn2": "one أو two أو three",
+        "HxIG7": "١ مليون"
+      }
+    },
+    {
+      "args": [
+        "ar-EG",
+        "UTC",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "ديسمبر التوقيت العالمي المنسق",
+        "NzGy3": "الفرنسية (كندا)",
+        "FNvn2": "one أو two أو three",
+        "HxIG7": "٢١٬٠٠٠ ترليون"
+      }
+    },
+    {
+      "args": [
+        "ar-EG",
+        "UTC",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "يناير التوقيت العالمي المنسق",
+        "NzGy3": "الفرنسية (كندا)",
+        "FNvn2": "one أو two أو three",
+        "HxIG7": "٢٫١ ألف"
+      }
+    },
+    {
+      "args": [
+        "ar-EG",
+        "UTC",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "يوليو التوقيت العالمي المنسق",
+        "NzGy3": "الفرنسية (كندا)",
+        "FNvn2": "one أو two أو three",
+        "HxIG7": "١ مليون"
+      }
+    },
+    {
+      "args": [
+        "ar-EG",
+        "America/New_York",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "ديسمبر التوقيت الرسمي الشرقي لأمريكا الشمالية",
+        "NzGy3": "الفرنسية (كندا)",
+        "FNvn2": "one أو two أو three",
+        "HxIG7": "٢١٬٠٠٠ ترليون"
+      }
+    },
+    {
+      "args": [
+        "ar-EG",
+        "America/New_York",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "ديسمبر التوقيت الرسمي الشرقي لأمريكا الشمالية",
+        "NzGy3": "الفرنسية (كندا)",
+        "FNvn2": "one أو two أو three",
+        "HxIG7": "٢٫١ ألف"
+      }
+    },
+    {
+      "args": [
+        "ar-EG",
+        "America/New_York",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "يونيو التوقيت الصيفي الشرقي لأمريكا الشمالية",
+        "NzGy3": "الفرنسية (كندا)",
+        "FNvn2": "one أو two أو three",
+        "HxIG7": "١ مليون"
+      }
+    },
+    {
+      "args": [
+        "ar-EG",
+        "Europe/Berlin",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "ديسمبر توقيت وسط أوروبا الرسمي",
+        "NzGy3": "الفرنسية (كندا)",
+        "FNvn2": "one أو two أو three",
+        "HxIG7": "٢١٬٠٠٠ ترليون"
+      }
+    },
+    {
+      "args": [
+        "ar-EG",
+        "Europe/Berlin",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "يناير توقيت وسط أوروبا الرسمي",
+        "NzGy3": "الفرنسية (كندا)",
+        "FNvn2": "one أو two أو three",
+        "HxIG7": "٢٫١ ألف"
+      }
+    },
+    {
+      "args": [
+        "ar-EG",
+        "Europe/Berlin",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "يوليو توقيت وسط أوروبا الصيفي",
+        "NzGy3": "الفرنسية (كندا)",
+        "FNvn2": "one أو two أو three",
+        "HxIG7": "١ مليون"
+      }
+    },
+    {
+      "args": [
+        "ru-RU",
+        "Asia/Shanghai",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "декабрь Китай, стандартное время",
+        "NzGy3": "французский (Канада)",
+        "FNvn2": "one, two или three",
+        "HxIG7": "21 000 триллионов"
+      }
+    },
+    {
+      "args": [
+        "ru-RU",
+        "Asia/Shanghai",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "январь Китай, стандартное время",
+        "NzGy3": "французский (Канада)",
+        "FNvn2": "one, two или three",
+        "HxIG7": "2,1 тысячи"
+      }
+    },
+    {
+      "args": [
+        "ru-RU",
+        "Asia/Shanghai",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "июль Китай, стандартное время",
+        "NzGy3": "французский (Канада)",
+        "FNvn2": "one, two или three",
+        "HxIG7": "1 миллион"
+      }
+    },
+    {
+      "args": [
+        "ru-RU",
+        "UTC",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "декабрь Всемирное координированное время",
+        "NzGy3": "французский (Канада)",
+        "FNvn2": "one, two или three",
+        "HxIG7": "21 000 триллионов"
+      }
+    },
+    {
+      "args": [
+        "ru-RU",
+        "UTC",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "январь Всемирное координированное время",
+        "NzGy3": "французский (Канада)",
+        "FNvn2": "one, two или three",
+        "HxIG7": "2,1 тысячи"
+      }
+    },
+    {
+      "args": [
+        "ru-RU",
+        "UTC",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "июль Всемирное координированное время",
+        "NzGy3": "французский (Канада)",
+        "FNvn2": "one, two или three",
+        "HxIG7": "1 миллион"
+      }
+    },
+    {
+      "args": [
+        "ru-RU",
+        "America/New_York",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "декабрь Восточная Америка, стандартное время",
+        "NzGy3": "французский (Канада)",
+        "FNvn2": "one, two или three",
+        "HxIG7": "21 000 триллионов"
+      }
+    },
+    {
+      "args": [
+        "ru-RU",
+        "America/New_York",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "декабрь Восточная Америка, стандартное время",
+        "NzGy3": "французский (Канада)",
+        "FNvn2": "one, two или three",
+        "HxIG7": "2,1 тысячи"
+      }
+    },
+    {
+      "args": [
+        "ru-RU",
+        "America/New_York",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "июнь Восточная Америка, летнее время",
+        "NzGy3": "французский (Канада)",
+        "FNvn2": "one, two или three",
+        "HxIG7": "1 миллион"
+      }
+    },
+    {
+      "args": [
+        "ru-RU",
+        "Europe/Berlin",
+        630883200000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "декабрь Центральная Европа, стандартное время",
+        "NzGy3": "французский (Канада)",
+        "FNvn2": "one, two или three",
+        "HxIG7": "21 000 триллионов"
+      }
+    },
+    {
+      "args": [
+        "ru-RU",
+        "Europe/Berlin",
+        1577836800000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        2100
+      ],
+      "expected": {
+        "mMAX8": "январь Центральная Европа, стандартное время",
+        "NzGy3": "французский (Канада)",
+        "FNvn2": "one, two или three",
+        "HxIG7": "2,1 тысячи"
+      }
+    },
+    {
+      "args": [
+        "ru-RU",
+        "Europe/Berlin",
+        1593561600000,
+        "fr-CA",
+        [
+          "one",
+          "two",
+          "three"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "июль Центральная Европа, летнее время",
+        "NzGy3": "французский (Канада)",
+        "FNvn2": "one, two или three",
+        "HxIG7": "1 миллион"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "UTC",
+        1577836800000,
+        "eo-UA",
+        [
+          "first",
+          "second"
+        ],
+        0
+      ],
+      "expected": {
+        "mMAX8": "January Coordinated Universal Time",
+        "NzGy3": "Esperanto (Ukraine)",
+        "FNvn2": "first or second",
+        "HxIG7": "0"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "UTC",
+        1577836800000,
+        "eo-UA",
+        [
+          "first",
+          "second"
+        ],
+        1
+      ],
+      "expected": {
+        "mMAX8": "January Coordinated Universal Time",
+        "NzGy3": "Esperanto (Ukraine)",
+        "FNvn2": "first or second",
+        "HxIG7": "1"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "UTC",
+        1577836800000,
+        "eo-UA",
+        [
+          "first",
+          "second"
+        ],
+        -1
+      ],
+      "expected": {
+        "mMAX8": "January Coordinated Universal Time",
+        "NzGy3": "Esperanto (Ukraine)",
+        "FNvn2": "first or second",
+        "HxIG7": "-1"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "UTC",
+        1577836800000,
+        "eo-UA",
+        [
+          "first",
+          "second"
+        ],
+        999
+      ],
+      "expected": {
+        "mMAX8": "January Coordinated Universal Time",
+        "NzGy3": "Esperanto (Ukraine)",
+        "FNvn2": "first or second",
+        "HxIG7": "999"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "UTC",
+        1577836800000,
+        "eo-UA",
+        [
+          "first",
+          "second"
+        ],
+        1000
+      ],
+      "expected": {
+        "mMAX8": "January Coordinated Universal Time",
+        "NzGy3": "Esperanto (Ukraine)",
+        "FNvn2": "first or second",
+        "HxIG7": "1 thousand"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "UTC",
+        1577836800000,
+        "eo-UA",
+        [
+          "first",
+          "second"
+        ],
+        1050
+      ],
+      "expected": {
+        "mMAX8": "January Coordinated Universal Time",
+        "NzGy3": "Esperanto (Ukraine)",
+        "FNvn2": "first or second",
+        "HxIG7": "1 thousand"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "UTC",
+        1577836800000,
+        "eo-UA",
+        [
+          "first",
+          "second"
+        ],
+        1250
+      ],
+      "expected": {
+        "mMAX8": "January Coordinated Universal Time",
+        "NzGy3": "Esperanto (Ukraine)",
+        "FNvn2": "first or second",
+        "HxIG7": "1.2 thousand"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "UTC",
+        1577836800000,
+        "eo-UA",
+        [
+          "first",
+          "second"
+        ],
+        1950
+      ],
+      "expected": {
+        "mMAX8": "January Coordinated Universal Time",
+        "NzGy3": "Esperanto (Ukraine)",
+        "FNvn2": "first or second",
+        "HxIG7": "2 thousand"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "UTC",
+        1577836800000,
+        "eo-UA",
+        [
+          "first",
+          "second"
+        ],
+        999499.99
+      ],
+      "expected": {
+        "mMAX8": "January Coordinated Universal Time",
+        "NzGy3": "Esperanto (Ukraine)",
+        "FNvn2": "first or second",
+        "HxIG7": "999 thousand"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "UTC",
+        1577836800000,
+        "eo-UA",
+        [
+          "first",
+          "second"
+        ],
+        999500
+      ],
+      "expected": {
+        "mMAX8": "January Coordinated Universal Time",
+        "NzGy3": "Esperanto (Ukraine)",
+        "FNvn2": "first or second",
+        "HxIG7": "1 million"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "UTC",
+        1577836800000,
+        "eo-UA",
+        [
+          "first",
+          "second"
+        ],
+        1000000000000000.0
+      ],
+      "expected": {
+        "mMAX8": "January Coordinated Universal Time",
+        "NzGy3": "Esperanto (Ukraine)",
+        "FNvn2": "first or second",
+        "HxIG7": "1000 trillion"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "UTC",
+        1577836800000,
+        "eo-UA",
+        [
+          "first",
+          "second"
+        ],
+        2.1e+16
+      ],
+      "expected": {
+        "mMAX8": "January Coordinated Universal Time",
+        "NzGy3": "Esperanto (Ukraine)",
+        "FNvn2": "first or second",
+        "HxIG7": "21,000 trillion"
+      }
+    },
+    {
+      "args": [
+        "en-US",
+        "UTC",
+        1577836800000,
+        "eo-UA",
+        [
+          "first",
+          "second"
+        ],
+        -1172700
+      ],
+      "expected": {
+        "mMAX8": "January Coordinated Universal Time",
+        "NzGy3": "Esperanto (Ukraine)",
+        "FNvn2": "first or second",
+        "HxIG7": "-1.2 million"
+      }
+    }
+  ]
+}

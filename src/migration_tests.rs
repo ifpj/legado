@@ -605,7 +605,7 @@ fn invoke(op: &str, a: &[Value], k: &Value) -> Result<Value> {
             )?;
             json!({"candidate":format!("{}{}",s(0)?,result[0]),"attempts":result[1],"bits":result[2],"elapsed_ms":result[3] as f64/1000.})
         }
-        "cf_gateway.locale_task.NativeLocale.format" => locale::Icu::load()?.format(
+        "cf_gateway.locale_task.NativeLocale.format" => locale::format(
             s(1)?,
             s(2)?,
             num(&a[3])?,

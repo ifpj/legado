@@ -23,7 +23,7 @@ Web 会自动适配暗色模式。接入示例页使用当前访问地址的域�
 
 左上角固定显示版本号和构建标识。构建标识取当前运行文件 SHA-256 的前 12 位，可区分包含未提交修改的本地构建；无需 Git 或额外运行工具。`/v1/status` 同样返回 `version` 与 `buildId`。修改源码后需重新构建并启动新程序，页面显示的是实际运行版本。
 
-不提供定时健康检测。容器采用 distroless/cc-debian12:nonroot，只携带可执行文件、ICU 运行库和许可声明，不含 shell。
+不提供定时健康检测。容器采用 gcr.io/distroless/static:nonroot，应用全静态链接，只携带可执行文件和许可声明，不含 shell 或 ICU 动态库。语言格式化使用 ICU4X 与内嵌 Unicode 数据。
 
 ## 网络设置
 
@@ -134,7 +134,7 @@ network 可选，兼容旧顶层 proxy / connectTo。timeoutMs 范围 1000～120
 
 ## 构建
 
-需要 Rust 1.99+。Linux 需要 C/C++ 工具链、CMake、Clang/libclang、NASM、ICU；Windows 需要 MSVC、CMake、libclang、NASM，ICU 使用系统库。Dockerfile 提供可复现的 Linux 构建环境。
+需要 Rust 1.99+。Linux 构建需要 C/C++ 工具链、CMake、Clang/libclang、NASM；Windows 需要 MSVC、CMake、libclang、NASM。无需系统 ICU。Dockerfile 使用 Alpine/musl 构建并执行 release 测试，检查 ELF 无 INTERP / NEEDED 后打包到 distroless/static；提供 linux/amd64、linux/arm64。
 
 ~~~sh
 cargo fmt --check

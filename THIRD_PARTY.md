@@ -8,7 +8,8 @@
 - profiles/webidl-surface-v1.json 的名称、继承及成员声明来自 W3C Webref 的 @webref/idl 3.85.2，MIT，见 LICENSES/webref.txt。运行时不含 IDL 引擎。
 - profiles/browser-api-declarations-v1.json 参考 nokk 的公开接口声明与属性顺序，是显式模型输入，不是录制的挑战答案。
 - 实验性 JSD 字段分组参考 xKiian/cloudflare-jsd 的 jsd/fp.go，MIT，见 LICENSES/cloudflare-jsd.txt。UA、语言、网址等由当轮输入填入；此路径不代表严格原生验收。
-- 系统 ICU 用于语言区域、日期、数值及排序操作。Windows 使用系统库，Docker 携带 Debian ICU 运行库；相关 ICU/Unicode 数据许可随运行库保留。
+- ICU4X 用于月份/时区名称、语言名称、列表及紧凑数字格式。采用 Rust 组件与内嵌 CLDR 数据，遵循 Unicode-3.0 许可，见依赖许可汇总；不包含 ICU4C 动态库。sys-locale 只负责读取系统语言。
+- Linux 全静态构建包含 musl 及工具链运行库。musl 许可见 LICENSES/musl.txt；GCC 运行库采用 GPLv3 与 Runtime Library Exception 3.1，例外全文见 LICENSES/gcc-runtime-exception.txt，GPLv3 全文见 LICENSE。
 - chrono-tz 依赖的时区数据许可见 LICENSES/tzdata.txt。
 - Wasmtime 仅运行匹配已审核摘要的有限算术模块，禁用外部导入并限制内存、指令与调用次数，相关许可见依赖汇总。
 

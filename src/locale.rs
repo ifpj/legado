@@ -1,282 +1,90 @@
-//! The same system ICU formatting operations used by the reference model.
+//! Locale-sensitive computation using embedded ICU4X data, with no system ICU.
 use crate::{
     epoch_ms, math,
     models::{has, Context, Results},
     re, require, Error, Result,
 };
-use serde_json::{json, Value};
-use std::{
-    collections::HashSet,
-    ffi::{c_char, c_void, CStr, CString},
-    sync::OnceLock,
+use icu_calendar::Gregorian;
+use icu_datetime::{
+    fieldsets::{zone, M},
+    DateTimeFormatter, NoCalendarFormatter,
 };
-pub(crate) struct Icu(libloading::Library);
-impl Icu {
-    pub(crate) fn load() -> Result<&'static Self> {
-        static ICU: OnceLock<std::result::Result<Icu, String>> = OnceLock::new();
-        let result = ICU.get_or_init(|| {
-            #[cfg(windows)]
-            let path = std::path::PathBuf::from(
-                std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()),
-            )
-            .join("System32/icu.dll");
-            #[cfg(not(windows))]
-            let path = std::path::PathBuf::from("libicui18n.so");
-            unsafe {
-                match libloading::Library::new(&path) {
-                    Ok(library) => Ok(Icu(library)),
-                    Err(error) => {
-                        #[cfg(not(windows))]
-                        for version in (50..=100).rev() {
-                            if let Ok(library) =
-                                libloading::Library::new(format!("libicui18n.so.{version}"))
-                            {
-                                return Ok(Icu(library));
-                            }
-                        }
-                        Err(error.to_string())
-                    }
-                }
-            }
-        });
-        result
-            .as_ref()
-            .map_err(|e| Error::new("LOCALE_UNAVAILABLE", e.clone()))
-    }
-    unsafe fn function<T: Copy>(&self, name: &[u8]) -> Result<T> {
-        if let Ok(symbol) = self.0.get::<T>(name) {
-            return Ok(*symbol);
-        }
-        // Linux distributions export versioned ICU symbols; Windows ICU uses
-        // unversioned names. Resolve the installed ABI instead of pinning one.
-        #[cfg(not(windows))]
-        for version in (50..=100).rev() {
-            let symbol = format!(
-                "{}_{version}\0",
-                std::str::from_utf8(name.strip_suffix(&[0]).unwrap_or(name)).unwrap()
-            );
-            if let Ok(symbol) = self.0.get::<T>(symbol.as_bytes()) {
-                return Ok(*symbol);
-            }
-        }
-        Err(Error::new(
-            "LOCALE_UNAVAILABLE",
-            format!("Missing ICU operation {}", String::from_utf8_lossy(name)),
-        ))
-    }
-    fn locale(&self) -> Result<String> {
-        unsafe {
-            let f: unsafe extern "C" fn() -> *const c_char = self.function(b"uloc_getDefault\0")?;
-            let p = f();
-            require(!p.is_null(), "ICU locale")?;
-            Ok(CStr::from_ptr(p)
-                .to_string_lossy()
-                .split('@')
-                .next()
-                .unwrap()
-                .replace('_', "-"))
-        }
-    }
-    pub(crate) fn format(
-        &self,
-        locale: &str,
-        zone: &str,
-        timestamp: f64,
-        language: &str,
-        words: &[String],
-        number: f64,
-    ) -> Result<Value> {
-        require(
-            re(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$").is_match(locale)
-                && re(r"^[A-Za-z_]+(?:/[A-Za-z_+-]+)*$").is_match(zone)
-                && re(r"^[a-z]{2,3}-[A-Z]{2}$").is_match(language)
-                && !words.is_empty()
-                && words.len() <= 8
-                && timestamp.is_finite()
-                && number.is_finite(),
-            "Locale operands",
-        )?;
-        let locale = CString::new(locale.replace('-', "_"))
-            .map_err(|_| Error::new("INVALID_DATA", "Locale string"))?;
-        let timezone: Vec<u16> = zone.encode_utf16().chain([0]).collect();
-        let pattern: Vec<u16> = "LLLL zzzz".encode_utf16().chain([0]).collect();
-        let mut out = json!({});
-        unsafe {
-            let open: unsafe extern "C" fn(
-                i32,
-                i32,
-                *const c_char,
-                *const u16,
-                i32,
-                *const u16,
-                i32,
-                *mut i32,
-            ) -> *mut c_void = self.function(b"udat_open\0")?;
-            let format: unsafe extern "C" fn(
-                *mut c_void,
-                f64,
-                *mut u16,
-                i32,
-                *mut c_void,
-                *mut i32,
-            ) -> i32 = self.function(b"udat_format\0")?;
-            let close: unsafe extern "C" fn(*mut c_void) = self.function(b"udat_close\0")?;
-            let mut status = 0;
-            let handle = open(
-                -2,
-                -2,
-                locale.as_ptr(),
-                timezone.as_ptr(),
-                -1,
-                pattern.as_ptr(),
-                -1,
-                &mut status,
-            );
-            check(status)?;
-            require(!handle.is_null(), "ICU date handle")?;
-            let handle = Handle {
-                pointer: handle,
-                close,
-            };
-            let mut buffer = vec![0u16; 2048];
-            let count = format(
-                handle.pointer,
-                timestamp,
-                buffer.as_mut_ptr(),
-                2048,
-                std::ptr::null_mut(),
-                &mut status,
-            );
-            out["mMAX8"] = json!(output(&buffer, count, status)?);
-            let open: unsafe extern "C" fn(*const c_char, i32, *mut i32) -> *mut c_void =
-                self.function(b"uldn_open\0")?;
-            let format: unsafe extern "C" fn(
-                *mut c_void,
-                *const c_char,
-                *mut u16,
-                i32,
-                *mut i32,
-            ) -> i32 = self.function(b"uldn_localeDisplayName\0")?;
-            let close: unsafe extern "C" fn(*mut c_void) = self.function(b"uldn_close\0")?;
-            status = 0;
-            let handle = open(locale.as_ptr(), 0, &mut status);
-            check(status)?;
-            require(!handle.is_null(), "ICU display handle")?;
-            let handle = Handle {
-                pointer: handle,
-                close,
-            };
-            let language = CString::new(language.replace('-', "_")).unwrap();
-            let count = format(
-                handle.pointer,
-                language.as_ptr(),
-                buffer.as_mut_ptr(),
-                2048,
-                &mut status,
-            );
-            out["NzGy3"] = json!(output(&buffer, count, status)?);
-            let open: unsafe extern "C" fn(*const c_char, i32, i32, *mut i32) -> *mut c_void =
-                self.function(b"ulistfmt_openForType\0")?;
-            let format: unsafe extern "C" fn(
-                *mut c_void,
-                *const *const u16,
-                *const i32,
-                i32,
-                *mut u16,
-                i32,
-                *mut i32,
-            ) -> i32 = self.function(b"ulistfmt_format\0")?;
-            let close: unsafe extern "C" fn(*mut c_void) = self.function(b"ulistfmt_close\0")?;
-            status = 0;
-            let handle = open(locale.as_ptr(), 1, 0, &mut status);
-            check(status)?;
-            require(!handle.is_null(), "ICU list handle")?;
-            let handle = Handle {
-                pointer: handle,
-                close,
-            };
-            let words: Vec<Vec<u16>> = words
-                .iter()
-                .map(|s| s.encode_utf16().chain([0]).collect())
-                .collect();
-            let pointers: Vec<_> = words.iter().map(|s| s.as_ptr()).collect();
-            let lengths = vec![-1i32; words.len()];
-            let count = format(
-                handle.pointer,
-                pointers.as_ptr(),
-                lengths.as_ptr(),
-                words.len() as i32,
-                buffer.as_mut_ptr(),
-                2048,
-                &mut status,
-            );
-            out["FNvn2"] = json!(output(&buffer, count, status)?);
-            let open: unsafe extern "C" fn(
-                i32,
-                *const u16,
-                i32,
-                *const c_char,
-                *mut c_void,
-                *mut i32,
-            ) -> *mut c_void = self.function(b"unum_open\0")?;
-            let format: unsafe extern "C" fn(
-                *mut c_void,
-                f64,
-                *mut u16,
-                i32,
-                *mut c_void,
-                *mut i32,
-            ) -> i32 = self.function(b"unum_formatDouble\0")?;
-            let close: unsafe extern "C" fn(*mut c_void) = self.function(b"unum_close\0")?;
-            status = 0;
-            let handle = open(
-                15,
-                std::ptr::null(),
-                0,
-                locale.as_ptr(),
-                std::ptr::null_mut(),
-                &mut status,
-            );
-            check(status)?;
-            require(!handle.is_null(), "ICU number handle")?;
-            let handle = Handle {
-                pointer: handle,
-                close,
-            };
-            let count = format(
-                handle.pointer,
-                number,
-                buffer.as_mut_ptr(),
-                2048,
-                std::ptr::null_mut(),
-                &mut status,
-            );
-            out["HxIG7"] = json!(output(&buffer, count, status)?);
-        }
-        Ok(out)
-    }
+use icu_decimal::{
+    input::{Decimal, FloatPrecision},
+    CompactDecimalFormatter,
+};
+use icu_list::{
+    options::{ListFormatterOptions, ListLength},
+    ListFormatter,
+};
+use icu_locale::{
+    names::{LanguageDisplay, LanguageIdentifierDisplayName, LanguageIdentifierDisplayNameOptions},
+    Locale,
+};
+use icu_time::{zone::models::AtTime, TimeZoneInfo, ZonedDateTime};
+use serde_json::{json, Value};
+use std::collections::HashSet;
+
+fn locale_error(error: impl std::fmt::Display) -> Error {
+    Error::new("LOCALE_UNAVAILABLE", format!("ICU4X: {error}"))
 }
-struct Handle {
-    pointer: *mut c_void,
-    close: unsafe extern "C" fn(*mut c_void),
+fn default_locale() -> String {
+    std::env::var("CF_GATEWAY_LOCALE").unwrap_or_else(|_| {
+        sys_locale::get_locale()
+            .filter(|value| !matches!(value.as_str(), "C" | "POSIX"))
+            .unwrap_or_else(|| "en-US".into())
+    })
 }
-impl Drop for Handle {
-    fn drop(&mut self) {
-        unsafe { (self.close)(self.pointer) }
-    }
-}
-fn check(status: i32) -> Result<()> {
-    require(status <= 0, "ICU rejected locale operands")
-}
-fn output(buffer: &[u16], count: i32, status: i32) -> Result<String> {
-    check(status)?;
+/// The reference model's four locale operations, calculated from current operands.
+pub(crate) fn format(
+    locale: &str,
+    zone_name: &str,
+    timestamp: f64,
+    language: &str,
+    words: &[String],
+    number: f64,
+) -> Result<Value> {
     require(
-        count >= 0 && (count as usize) < buffer.len(),
-        "ICU output bounds",
+        re(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$").is_match(locale)
+            && re(r"^[A-Za-z_]+(?:/[A-Za-z_+-]+)*$").is_match(zone_name)
+            && re(r"^[a-z]{2,3}-[A-Z]{2}$").is_match(language)
+            && !words.is_empty()
+            && words.len() <= 8
+            && timestamp.is_finite()
+            && number.is_finite(),
+        "Locale operands",
     )?;
-    String::from_utf16(&buffer[..count as usize])
-        .map_err(|_| Error::new("INVALID_DATA", "ICU Unicode output"))
+    let locale: Locale = locale.replace('_', "-").parse().map_err(locale_error)?;
+    let language: Locale = language.parse().map_err(locale_error)?;
+    let timezone: chrono_tz::Tz = zone_name.parse().map_err(locale_error)?;
+    let utc = chrono::DateTime::from_timestamp_millis(timestamp as i64)
+        .ok_or_else(|| locale_error("Timestamp out of range"))?;
+    let local = utc.with_timezone(&timezone);
+    let input: ZonedDateTime<Gregorian, TimeZoneInfo<AtTime>> = (&local).into();
+    let month =
+        DateTimeFormatter::try_new(locale.clone().into(), M::long()).map_err(locale_error)?;
+    let zone = NoCalendarFormatter::try_new(locale.clone().into(), zone::SpecificLong)
+        .map_err(locale_error)?;
+    let month = month.format(&input).to_string();
+    let zone = zone.format(&input.zone).to_string();
+    let mut options = LanguageIdentifierDisplayNameOptions::default();
+    options.language_display = Some(LanguageDisplay::Standard);
+    let name =
+        LanguageIdentifierDisplayName::try_new_heavy(locale.clone().into(), language.id, options)
+            .map_err(locale_error)?;
+    let list = ListFormatter::try_new_or(
+        locale.clone().into(),
+        ListFormatterOptions::default().with_length(ListLength::Wide),
+    )
+    .map_err(locale_error)?;
+    let compact = CompactDecimalFormatter::try_new_long(locale.into(), Default::default())
+        .map_err(locale_error)?;
+    let number = Decimal::try_from_f64(number, FloatPrecision::RoundTrip).map_err(locale_error)?;
+    Ok(
+        json!({"mMAX8":format!("{month} {zone}"),"NzGy3":name.as_borrowed().to_string(),"FNvn2":list.format(words.iter()).to_string(),"HxIG7":compact.format(&number).to_string()}),
+    )
 }
+
 pub fn calculate(c: &Context<'_>, results: &mut Results) -> Result<()> {
     let tag = c.catalog.modules.iter().find_map(|m| {
         if c.response
@@ -312,10 +120,9 @@ pub fn calculate(c: &Context<'_>, results: &mut Results) -> Result<()> {
             }
         }
         let (timestamp, amount, language, words) = operands(&literals, &numbers)?;
-        let icu = Icu::load()?;
-        let locale = std::env::var("CF_GATEWAY_LOCALE").unwrap_or(icu.locale()?);
+        let locale = default_locale();
         let zone = std::env::var("CF_GATEWAY_TIMEZONE").unwrap_or_else(|_| "Asia/Shanghai".into());
-        let mut fields = icu.format(&locale, &zone, timestamp, &language, &words, amount)?;
+        let mut fields = format(&locale, &zone, timestamp, &language, &words, amount)?;
         fields["XwYHI5"] = json!("zh-CN");
         fields["Ecdf9"] = json!(["zh-CN", "zh", "en"]);
         fields["yGyw0"] = json!([locale]);
@@ -380,4 +187,46 @@ pub(crate) fn operands(
         "Locale task operand bounds",
     )?;
     Ok((timestamp, amount, languages[0].to_string(), words))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn embedded_locale_data_matches_independent_vectors() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/locale-format-vectors.json"))
+                .unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 109);
+        for case in cases {
+            let args = &case["args"];
+            let actual = format(
+                args[0].as_str().unwrap(),
+                args[1].as_str().unwrap(),
+                args[2].as_f64().unwrap(),
+                args[3].as_str().unwrap(),
+                &serde_json::from_value::<Vec<String>>(args[4].clone()).unwrap(),
+                args[5].as_f64().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(actual, case["expected"], "{args}");
+        }
+    }
+    #[test]
+    fn invalid_operands_fail_without_fallback_or_system_libraries() {
+        let words = vec!["one".to_owned()];
+        for (locale, zone, time, language, list, number) in [
+            ("../invalid", "UTC", 0., "eo-UA", words.clone(), 1000.),
+            ("en-US", "UTC", f64::INFINITY, "eo-UA", words.clone(), 1000.),
+            ("en-US", "UTC", 0., "eo-UA", words.clone(), f64::NAN),
+            ("en-US", "Not/AZone", 0., "eo-UA", words.clone(), 1000.),
+            ("en-US", "UTC", 0., "invalid", words.clone(), 1000.),
+            ("en-US", "UTC", 0., "eo-UA", vec![], 1000.),
+            ("en-US", "UTC", 0., "eo-UA", vec!["one".into(); 9], 1000.),
+            ("en-US", "UTC", 1e20, "eo-UA", words.clone(), 1000.),
+        ] {
+            assert!(format(locale, zone, time, language, &list, number).is_err());
+        }
+    }
 }

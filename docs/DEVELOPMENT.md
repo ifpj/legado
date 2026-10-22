@@ -66,4 +66,8 @@ Web“请求历史”可筛选处理失败，查看 code、error、details、排
 
 ## 平台
 
-Windows 使用系统 ICU；Linux 动态查找 libicui18n.so 及版本化符号。Docker 在 Debian 12 构建，并将 ICU 72 运行库复制到 distroless/cc-debian12。不能直接换成 distroless/static 并删掉 ICU：日期、数值与排序模型会缺失依赖。升级基础发行版时同时检查 ICU 路径和两种架构的容器测试。
+语言区域模块使用锁定版本的 ICU4X 2.3，数据内嵌于二进制；不再动态加载 Windows ICU DLL 或 Linux ICU .so。月份/时区、语言名称、析取列表和紧凑数字均使用对应组件，语言名称采用带本地化组合模板的接口。遵循 CF_GATEWAY_LOCALE，缺省读取系统语言，C/POSIX 或无语言设置回退 en-US；时区仍由 CF_GATEWAY_TIMEZONE 指定。
+
+Docker 使用 Rust 1.99 / Alpine 3.24 的 musl 目标，构建期的 C/C++ 工具链只用于 TLS 等原生依赖。release 回归与最终程序共用优化依赖，ELF 检查拒绝动态加载器及共享库依赖。运行镜像为 gcr.io/distroless/static:nonroot，不复制任何 ICU 动态库。两架构均需执行实际容器冒烟，不能仅以交叉编译成功作为验收。
+
+ICU4X 的 compact number 和 language display name 接口仍含不稳定 API，版本与数据通过 Cargo.lock 固定；升级时重跑 locale-format-vectors.json。该文件为公开格式化操作数，与站点挑战无关。与旧系统 ICU 对照的 109 组中，三组日语纽约时区名称采用 CLDR 48 的米国東部写法，其旧值和来源链接保留于 fixture；其余字段不放宽断言。
