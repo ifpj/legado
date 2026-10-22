@@ -16,9 +16,10 @@ const server=http.createServer((req,res)=>{
     try{const r=await fetch(base+'/v1/status',{headers});await r.arrayBuffer();assert.equal(r.status,200);break;}
     catch(e){if(i===29)throw e;await new Promise(r=>setTimeout(r,500));}
   }
-  const index=await fetch(base+'/');assert.equal(index.status,200);assert.match(await index.text(),/接入示例/);
+  const index=await fetch(base+'/');assert.equal(index.status,200);const html=await index.text();assert.match(html,/接入示例/);
   const logo=await fetch(base+'/logo.png');assert.equal(logo.headers.get('content-type'),'image/png');await logo.arrayBuffer();
   const status=await (await fetch(base+'/v1/status',{headers})).json();
+  assert.match(status.buildId,/^[a-f0-9]{12}$/);assert.ok(html.includes('v'+status.version+' · '+status.buildId));
   assert.equal(status.runtime.language,'Rust');assert.equal(status.runtime.python,null);assert.ok(status.runtime.rssBytes>0);
   if(token){for(const path of ['/v1/status','/v1/history?token='+token]){const denied=await fetch(base+path);await denied.arrayBuffer();assert.equal(denied.status,401);}}
   for(const site of ['twkan','69shuba','banxia']){
@@ -27,8 +28,16 @@ const server=http.createServer((req,res)=>{
     const script=await r.text();assert.match(script,/var CF_BASE = "https:\/\/reader.example:8443\/gateway"/);
     assert.match(script,/java.t2s/);assert.match(script,/cfDiscovery/);
   }
+  const bundleQuery=new URLSearchParams({base:'https://reader.example:8443/gateway',...(token?{token}:{})});
+  const bundleResponse=await fetch(base+'/sources.json?'+bundleQuery);assert.equal(bundleResponse.status,200);
+  const bundle=await bundleResponse.json();assert.equal(bundle.length,3);assert.equal(new Set(bundle.map(s=>s.bookSourceUrl)).size,3);
+  for(const source of bundle){assert.match(source.mainJs,/function cfIntro\(/);assert.match(source.mainJs,/var CF_BASE = "https:\/\/reader.example:8443\/gateway"/);}
   const value=await (await fetch(base+'/v1/fetch',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({url:upstream+'/fresh?test=1',session:'container-smoke'})})).json();
   assert.equal(value.ok,true);assert.match(value.body,/每次取页/);assert.equal(value.contentCached,false);
+  const inventory=await (await fetch(base+'/v1/status',{headers})).json();
+  const item=inventory.sessionDetails.find(s=>s.session==='container-smoke'&&s.origin===upstream);
+  assert.ok(item);assert.equal(item.verified,true);assert.equal(item.hasProxy,false);assert.ok(item.lastUsedAtMs>0);
+  assert.equal(inventory.sessionDetails.length,inventory.runtime.sessions);
   const raw=await fetch(base+'/fetch?'+new URLSearchParams({url:upstream+'/missing'}),{headers});assert.equal(raw.status,404);assert.match(await raw.text(),/网站实际/);
   const image=await fetch(base+'/image?'+new URLSearchParams({url:upstream+'/cover',...(token?{token}:{})}));assert.equal(image.status,200);assert.equal(image.headers.get('content-type'),'image/png');assert.deepEqual(Buffer.from(await image.arrayBuffer()),pixel);
   const history=await (await fetch(base+'/v1/history',{headers})).json();

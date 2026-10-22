@@ -14,8 +14,13 @@
 | catalog / models / model_geometry / surface / locale / semantics / declared | 按当轮输入计算已识别任务 |
 | wire / completion / http_tasks | 编解码、后续阶段判定、受约束的 HTTP 子任务 |
 | sources / assets/*-parser.js | 动态书源导出及各站点 HTML 解析 |
+| embedded | 已知站点的嵌入式验证声明、搜索表单与验证 Cookie 约束 |
 
 profiles 是显式声明、公式和不可变协议布局，不是已计算的浏览器指纹或可复用验证凭证。当前软件模型不声称测量了真实浏览器或发生了人工交互。
+
+Cookie 上下文按客户端会话名和代理隔离，使用弱引用索引；没有存活来源会话时不会额外保留 Cookie。来源连接、验证锁、读取限额和验证代数独立，禁止把父域 Cookie 的共享误写成多个来源共用“已验证”标志。线路回退清理 Cookie 时只处理匹配当前 URL 的验证凭证，不能清空共享容器内其他域名的凭证。
+
+`CANCELLED` 保留在失败统计中，新增 stage 仅用于定位取消发生于排队、上游读取还是验证。必须在客户端动作与服务端记录之间建立对应，并测试返回该列表项后能否重新加载；不要通过更改统计分母或无限重试来掩盖加载问题。
 
 Wasmtime 只用于匹配已审核摘要、无外部导入且带内存/指令/调用限制的有限算术模块，不是任意网站程序运行入口。Tree-sitter 用于读取语法，不执行 JavaScript。
 
@@ -35,6 +40,9 @@ Wasmtime 只用于匹配已审核摘要、无外部导入且带内存/指令/调
 cargo fmt --check
 cargo test --locked
 for file in assets/*.js tests/*.cjs; do node --check "$file"; done
+node tests/source-contracts.cjs
+node tests/twkan-cleanup.cjs
+node tests/content-cleanup.cjs
 docker build -t cf-gateway:test .
 ```
 

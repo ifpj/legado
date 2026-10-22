@@ -71,7 +71,9 @@ fn send(status: StatusCode, body: String, kind: &str) -> Response {
 async fn index() -> Response {
     let mut response = send(
         StatusCode::OK,
-        include_str!("../assets/index.html").into(),
+        include_str!("../assets/index.html")
+            .replace("{{VERSION}}", crate::version::VERSION)
+            .replace("{{BUILD_ID}}", crate::version::build_id()),
         "text/html; charset=utf-8",
     );
     response.headers_mut().insert("content-security-policy","default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'".parse().unwrap());
@@ -235,6 +237,36 @@ async fn source_js(
     );
     Ok(response)
 }
+async fn sources_json(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Response> {
+    authorized_readonly_link(&app, &headers, &query)?;
+    let fallback = format!(
+        "http://{}",
+        headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("127.0.0.1:19686")
+    );
+    let sources = crate::sources::bundle(
+        query.get("base").map(String::as_str).unwrap_or(&fallback),
+        &app.token,
+    )?;
+    let mut response = send(
+        StatusCode::OK,
+        serde_json::to_string(&sources)?,
+        "application/json; charset=utf-8",
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        "attachment; filename=cf-gateway-sources.json"
+            .parse()
+            .unwrap(),
+    );
+    Ok(response)
+}
 pub fn router(service: Service, token: String) -> Router {
     let state = App {
         service: Arc::new(service),
@@ -248,6 +280,7 @@ pub fn router(service: Service, token: String) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/history", get(history))
         .route("/source.js", get(source_js))
+        .route("/sources.json", get(sources_json))
         .route("/fetch", get(fetch_html))
         .route("/image", get(fetch_image))
         .route("/v1/fetch", post(fetch_json))

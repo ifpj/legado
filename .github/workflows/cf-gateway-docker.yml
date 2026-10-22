@@ -35,7 +35,11 @@ jobs:
         with:
           node-version: '24'
       - name: Check Web and source scripts
-        run: for file in assets/*.js tests/*.cjs; do node --check "$file"; done
+        run: |
+          for file in assets/*.js tests/*.cjs; do node --check "$file"; done
+          node tests/source-contracts.cjs
+          node tests/twkan-cleanup.cjs
+          node tests/content-cleanup.cjs
       - name: Image name
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cf-gateway" >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1

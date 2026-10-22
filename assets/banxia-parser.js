@@ -19,16 +19,26 @@ function getBookInfo(book){
         else if(/^最新章节/.test(text))latest=cfText(p.selectFirst('a'));
     }
     var intro=info.selectFirst('.describe-html');if(intro){intro.select('script,style,span[style],a.__cf_email__').remove();}
-    return {bookUrl:cfUrl(book.bookUrl),name:cfText(info.selectFirst('h1')),author:author,kind:kind.join(' / '),intro:intro?cfText(intro):'',coverUrl:cfImage(doc.selectFirst('.book-img')),latestChapterTitle:latest,tocUrl:cfUrl(book.bookUrl)};
+    return {bookUrl:cfUrl(book.bookUrl),name:cfText(info.selectFirst('h1')),author:author,kind:kind.join(' / '),intro:intro?cfIntro(intro.html()):'',coverUrl:cfImage(doc.selectFirst('.book-img')),latestChapterTitle:latest,tocUrl:cfUrl(book.bookUrl)};
 }
 function getChapters(book){
     var doc=cfDoc(book.tocUrl||book.bookUrl),links=doc.select('.book-list li a[href]'),out=[],seen={};
     for(var i=0;i<links.size();i++){var a=links.get(i),url=cfUrl(a.absUrl('href'));if(!/\/books\/\d+\/\d+\.html$/.test(url)||seen[url])continue;seen[url]=true;out.push({title:cfText(a),url:url});}
     if(!out.length)throw '完整目录为空';return out;
 }
+function bxCleanContent(value){
+    // Observed broken navigation strings are literal text, not regular
+    // expressions to execute. They contain no narrative content.
+    var text=String(value),notices=[
+        '浏♂览♂器♂搜索\n\n\\（书名\\）.+?\\{♂,,♂\\} 可/以快速找到你在看的/书！',
+        '♂章节前往章节前往♂.+?\\{?/?♂\\}♂输\\入\\网\\址：.{\\ＷＷＷ··}\n\n/♂\n\n半夏小说，快乐很多'
+    ];
+    for(var i=0;i<notices.length;i++)text=text.split(notices[i]).join('');
+    return text.replace(/(?:&?nbsp;){2,}/g,'').replace(/(^|\n)[ \t\u3000]*半夏小说[，,]快乐很多[ \t\u3000]*(?=\n|$)/g,'$1');
+}
 function getContent(chapter,book,nextChapterUrl){
     var doc=cfDoc(chapter.url),el=doc.selectFirst('#nr1');if(!el)throw '正文容器不存在';
     el.select('script,style,ins,.ad,.ads').remove();
     var html=String(el.html()).replace(/<br\s*\/?\s*>/gi,'\n'),text=String(cfDocument(html).wholeText()).replace(/\n[ \t\u3000]*/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
-    if(!text)throw '正文为空';return java.t2s(text);
+    if(!text)throw '正文为空';return cfCleanChapterText(bxCleanContent(String(java.t2s(text))),chapter.title,cfText(doc.selectFirst('h1')),book&&book.name);
 }

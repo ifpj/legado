@@ -8,12 +8,13 @@ use crate::{
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{atomic::Ordering, Arc, Mutex},
+    sync::{atomic::Ordering, Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 struct Entry {
     session: Arc<Session>,
     touched: Instant,
+    last_used_at_ms: u64,
 }
 #[derive(Default)]
 struct Stats {
@@ -56,6 +57,7 @@ pub struct Service {
     engine: Engine,
     dns: Dns,
     sessions: Mutex<HashMap<(String, String, Option<String>), Entry>>,
+    cookie_contexts: Mutex<HashMap<(String, Option<String>), Weak<wreq::cookie::Jar>>>,
     stats: Mutex<Stats>,
     started: Instant,
 }
@@ -70,6 +72,7 @@ impl Service {
             engine,
             dns: Dns::new(true)?,
             sessions: Mutex::default(),
+            cookie_contexts: Mutex::default(),
             stats: Mutex::default(),
             started: Instant::now(),
         })
@@ -79,6 +82,7 @@ impl Service {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(entry) = sessions.get_mut(&key) {
             entry.touched = Instant::now();
+            entry.last_used_at_ms = epoch_ms();
             return Ok(entry.session.clone());
         }
         if sessions.len() >= 32 {
@@ -95,24 +99,49 @@ impl Service {
                 return Err(e);
             }
         }
-        let session = Arc::new(Session::new(self.dns.clone(), proxy)?);
+        // One logical client has a browser-style cookie jar. The jar enforces
+        // Domain/Path/Secure; connection and verification state stay per origin.
+        let mut contexts = self.cookie_contexts.lock().unwrap();
+        contexts.retain(|_, jar| jar.strong_count() > 0);
+        let context = (name.to_string(), proxy.clone());
+        let cookies = contexts
+            .get(&context)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| {
+                let jar = Arc::new(wreq::cookie::Jar::default());
+                contexts.insert(context, Arc::downgrade(&jar));
+                jar
+            });
+        let session = Arc::new(Session::with_cookies(self.dns.clone(), proxy, cookies)?);
         sessions.insert(
             key,
             Entry {
                 session: session.clone(),
                 touched: Instant::now(),
+                last_used_at_ms: epoch_ms(),
             },
         );
         Ok(session)
     }
     pub fn status(&self) -> Value {
-        let sessions = self.sessions.lock().unwrap().len();
+        let mut session_details: Vec<_> = self.sessions.lock().unwrap().iter().map(|((origin, name, proxy), entry)| {
+            json!({"session":name,"origin":origin,"hasProxy":proxy.is_some(),"verified":entry.session.verified.load(Ordering::Acquire),"busy":Arc::strong_count(&entry.session)>1,"lastUsedAtMs":entry.last_used_at_ms})
+        }).collect();
+        session_details.sort_by(|a, b| {
+            b["lastUsedAtMs"]
+                .as_u64()
+                .cmp(&a["lastUsedAtMs"].as_u64())
+                .then_with(|| a["session"].as_str().cmp(&b["session"].as_str()))
+                .then_with(|| a["origin"].as_str().cmp(&b["origin"].as_str()))
+                .then_with(|| a["hasProxy"].as_bool().cmp(&b["hasProxy"].as_bool()))
+        });
+        let sessions = session_details.len();
         let stats = self.stats.lock().unwrap();
         let mut system = sysinfo::System::new();
         let pid = sysinfo::Pid::from_u32(std::process::id());
         system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
         let rss = system.process(pid).map(|p| p.memory());
-        json!({"service":"cf-gateway-rust","version":env!("CARGO_PKG_VERSION"),"mode":"pure-algorithm","precomputedEnvironmentProfile":false,"strictPureAlgorithmAcceptance":stats.strict,"uptimeSeconds":self.started.elapsed().as_secs(),"requests":stats.total,"active":stats.active,"success":stats.success,"failed":stats.failed,"runtime":{"language":"Rust","python":null,"rustEnabled":true,"rssBytes":rss,"sessions":sessions,"verifiedReadConcurrency":4,"responseCache":false,"defaultMode":"relay"},"recent":stats.recent,"capabilities":{"nativeHttp":true,"managedChallenge":"native-rust-protocol","turnstile":"native-finite-recipes","jsdOneshot":"experimental"}})
+        json!({"service":"cf-gateway-rust","version":crate::version::VERSION,"buildId":crate::version::build_id(),"mode":"pure-algorithm","precomputedEnvironmentProfile":false,"strictPureAlgorithmAcceptance":stats.strict,"uptimeSeconds":self.started.elapsed().as_secs(),"requests":stats.total,"active":stats.active,"success":stats.success,"failed":stats.failed,"runtime":{"language":"Rust","python":null,"rustEnabled":true,"rssBytes":rss,"sessions":sessions,"verifiedReadConcurrency":4,"responseCache":false,"defaultMode":"relay"},"recent":stats.recent,"sessionDetails":session_details,"capabilities":{"nativeHttp":true,"managedChallenge":"native-rust-protocol","turnstile":"native-finite-recipes","jsdOneshot":"experimental"}})
     }
     pub fn history(&self) -> Value {
         let stats = self.stats.lock().unwrap();
@@ -216,12 +245,14 @@ impl Service {
         let outcome = tokio::time::timeout_at(deadline.into(), async {
             let mut cached = None;
             loop {
+                active.record["stage"] = json!("waitingForVerification");
                 if session.verified.load(Ordering::Acquire) && !analyze && !export {
                     let read = session.gate.read().await;
                     if !session.verified.load(Ordering::Acquire) {
                         drop(read);
                         continue;
                     }
+                    active.record["stage"] = json!("waitingForReadSlot");
                     let permit = session
                         .reads
                         .acquire()
@@ -229,15 +260,18 @@ impl Service {
                         .map_err(|_| Error::new("BUSY", "会话已关闭"))?;
                     let queue_ms = start.elapsed().as_secs_f64() * 1000.;
                     let generation = session.generation.load(Ordering::Acquire);
-                    let response = session.request("GET", url, None, &[], deadline).await?;
+                    active.record["stage"] = json!("fetchingUpstream");
+                    let response = crate::engine::target(&session, url, deadline).await?;
                     let challenge = recognize(
                         &response.url,
                         response.status,
                         &response.headers,
                         &response.text,
                     )?;
-                    if !matches!(challenge.kind.as_str(), "managed" | "blocked" | "jsd")
-                        && !(response.status == 403 && response.headers.contains_key("cf-ray"))
+                    if !matches!(
+                        challenge.kind.as_str(),
+                        "managed" | "blocked" | "jsd" | "embedded-turnstile"
+                    ) && !(response.status == 403 && response.headers.contains_key("cf-ray"))
                     {
                         let outcome = crate::engine::Outcome {
                             response,
@@ -251,6 +285,7 @@ impl Service {
                     drop(permit);
                     drop(read);
                 }
+                active.record["stage"] = json!("waitingForVerification");
                 let exclusive = session.gate.write().await;
                 // A previous verifier may have completed while this request
                 // waited. Re-enter through the shared read path in that case.
@@ -274,10 +309,33 @@ impl Service {
                 if !analyze {
                     session.verified.store(false, Ordering::Release);
                 }
-                let result = self
+                active.record["stage"] = json!("verifyingAndFetching");
+                let mut result = self
                     .engine
                     .run(session.clone(), url, deadline, analyze, response)
                     .await;
+                // Never replay a rejected continuation. Allow one fresh round
+                // under the original total deadline and exclusive gate.
+                if !analyze && retry_continuation(&result, deadline) {
+                    let first = result.as_ref().err().unwrap().reply();
+                    result = self
+                        .engine
+                        .run(session.clone(), url, deadline, false, None)
+                        .await;
+                    match &mut result {
+                        Ok(outcome) => {
+                            outcome.details["freshRoundRetry"] =
+                                json!({"attempts":2,"firstError":first})
+                        }
+                        Err(error) => {
+                            if !error.details.is_object() {
+                                error.details = json!({});
+                            }
+                            error.details["freshRoundRetry"] =
+                                json!({"attempts":2,"firstError":first});
+                        }
+                    }
+                }
                 if !analyze {
                     session.verified.store(result.is_ok(), Ordering::Release);
                 }
@@ -302,6 +360,9 @@ impl Service {
                 record["ok"] = json!(true);
                 record["status"] = json!(outcome.response.status);
                 record["challenge"] = outcome.details["type"].clone();
+                if let Some(retry) = outcome.details.get("freshRoundRetry") {
+                    record["freshRoundRetry"] = retry.clone();
+                }
                 record["queueMs"] = json!(queue_ms);
                 record["bytes"] = json!(outcome.response.content.len());
                 record["route"] = json!(if proxy.is_some() {
@@ -359,6 +420,14 @@ impl Service {
         result
     }
 }
+fn retry_continuation(result: &Result<crate::engine::Outcome>, deadline: Instant) -> bool {
+    Instant::now() < deadline
+        && result.as_ref().err().is_some_and(|e| {
+            e.code == "MANAGED_CONTINUATION_REJECTED"
+                && e.details["status"] == 400
+                && e.details["stage"] == "frame-tasks"
+        })
+}
 fn image_type(response: &crate::network::HttpResponse) -> Result<&'static str> {
     let b = &response.content;
     let kind = if b.starts_with(b"\x89PNG\r\n\x1a\n") {
@@ -380,10 +449,18 @@ fn image_type(response: &crate::network::HttpResponse) -> Result<&'static str> {
         }
     }
     let mut error = Error::new(
-        "IMAGE_UPSTREAM_ERROR",
-        "未取得有效的 PNG/JPEG/GIF/WebP/AVIF 图片",
+        if response.status == 404 {
+            "IMAGE_NOT_FOUND"
+        } else {
+            "IMAGE_UPSTREAM_ERROR"
+        },
+        if response.status == 404 {
+            "网站返回 404，未提供该封面"
+        } else {
+            "未取得有效的 PNG/JPEG/GIF/WebP/AVIF 图片"
+        },
     );
-    error.status = 502;
+    error.status = if response.status == 404 { 404 } else { 502 };
     error.details =
         json!({"status":response.status,"contentType":response.headers.get("content-type")});
     Err(error)
@@ -404,6 +481,35 @@ fn credentials(s: &Session, url: &str) -> Result<Value> {
 #[cfg(test)]
 mod regression {
     use super::*;
+    #[test]
+    fn fresh_round_retry_is_limited_to_the_observed_continuation_rejection_and_deadline() {
+        let future = Instant::now() + Duration::from_secs(1);
+        let make = |code: &str, status: u16, stage: &str| -> Result<crate::engine::Outcome> {
+            let mut e = Error::new(code, "fixture");
+            e.details = json!({"status":status,"stage":stage});
+            Err(e)
+        };
+        assert!(retry_continuation(
+            &make("MANAGED_CONTINUATION_REJECTED", 400, "frame-tasks"),
+            future
+        ));
+        assert!(!retry_continuation(
+            &make("MANAGED_CONTINUATION_REJECTED", 400, "frame-tasks"),
+            Instant::now()
+        ));
+        assert!(!retry_continuation(
+            &make("MANAGED_CONTINUATION_REJECTED", 403, "frame-tasks"),
+            future
+        ));
+        assert!(!retry_continuation(
+            &make("MANAGED_CONTINUATION_REJECTED", 400, "parent"),
+            future
+        ));
+        assert!(!retry_continuation(
+            &make("UPSTREAM_ERROR", 400, "frame-tasks"),
+            future
+        ));
+    }
     #[test]
     fn history_and_overview_have_independent_bounds() {
         let mut stats = Stats::default();
@@ -470,6 +576,117 @@ mod regression {
                 .unwrap()["hostOnly"],
             true
         );
+    }
+    #[test]
+    fn cookie_context_shares_valid_domain_cookies_but_keeps_origins_and_clients_isolated() {
+        let s = service();
+        let main = s
+            .session("https://www.example.org/", "reader", None)
+            .unwrap();
+        let image = s
+            .session("https://image.example.org/", "reader", None)
+            .unwrap();
+        let unrelated = s.session("https://example.net/", "reader", None).unwrap();
+        assert!(Arc::ptr_eq(&main.cookies, &image.cookies));
+        assert!(!Arc::ptr_eq(&main, &image));
+        main.cookies.add(
+            "parent=shared; Domain=.example.org; Path=/; Secure",
+            "https://www.example.org/",
+        );
+        main.cookies
+            .add("host=private; Path=/; Secure", "https://www.example.org/");
+        main.cookies.add(
+            "path=restricted; Domain=.example.org; Path=/account; Secure",
+            "https://www.example.org/account",
+        );
+        let names = |url: &str| {
+            main.cookies
+                .matches(url)
+                .map(|c| c.name().to_string())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(
+            names("https://image.example.org/"),
+            ["parent".to_string()].into()
+        );
+        assert!(names("https://example.net/").is_empty());
+        assert!(names("http://image.example.org/").is_empty());
+        assert!(Arc::ptr_eq(&main.cookies, &unrelated.cookies));
+        main.verified.store(true, Ordering::Release);
+        main.generation.store(3, Ordering::Release);
+        assert!(!image.verified.load(Ordering::Acquire));
+        assert_eq!(image.generation.load(Ordering::Acquire), 0);
+        let other = s
+            .session("https://image.example.org/", "other", None)
+            .unwrap();
+        let proxy = s
+            .session(
+                "https://image.example.org/",
+                "reader",
+                Some("http://127.0.0.1:9999".into()),
+            )
+            .unwrap();
+        assert!(!Arc::ptr_eq(&main.cookies, &other.cookies));
+        assert!(!Arc::ptr_eq(&main.cookies, &proxy.cookies));
+        assert!(other
+            .cookies
+            .matches("https://image.example.org/")
+            .next()
+            .is_none());
+    }
+    #[test]
+    fn inventory_reports_live_origin_sessions_without_cookies_or_proxy_credentials() {
+        let s = service();
+        assert_eq!(s.status()["sessionDetails"], json!([]));
+        let main = s
+            .session("https://www.example.org/", "phone-A", None)
+            .unwrap();
+        let image = s
+            .session("https://image.example.org/", "phone-A", None)
+            .unwrap();
+        main.verified.store(true, Ordering::Release);
+        main.cookies.add(
+            "login=private-cookie-value; Path=/",
+            "https://www.example.org/",
+        );
+        s.session(
+            "https://example.org/",
+            "phone-B",
+            Some("http://proxy-user:proxy-password@127.0.0.1:9999".into()),
+        )
+        .unwrap();
+        let status = s.status();
+        let rows = status["sessionDetails"].as_array().unwrap();
+        assert_eq!(status["runtime"]["sessions"], rows.len());
+        assert_eq!(rows.len(), 3);
+        let item = rows
+            .iter()
+            .find(|v| v["origin"] == "https://www.example.org")
+            .unwrap();
+        assert_eq!(item["session"], "phone-A");
+        assert_eq!(item["verified"], true);
+        assert_eq!(item["busy"], true);
+        let timestamp = item["lastUsedAtMs"].as_u64().unwrap();
+        assert!(timestamp <= epoch_ms() && epoch_ms() - timestamp < 5000);
+        drop(main);
+        drop(image);
+        assert!(s.status()["sessionDetails"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| v["busy"] == false));
+        assert!(rows
+            .iter()
+            .any(|v| v["session"] == "phone-B" && v["hasProxy"] == true));
+        let text = status.to_string();
+        for secret in [
+            "private-cookie-value",
+            "proxy-user",
+            "proxy-password",
+            "9999",
+        ] {
+            assert!(!text.contains(secret));
+        }
     }
     #[test]
     fn session_identity_capacity_and_active_eviction_are_bounded() {

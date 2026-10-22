@@ -7,7 +7,63 @@ use crate::{
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+fn embedded_token(values: &[&str]) -> Result<String> {
+    require(
+        !values.contains(&"fail"),
+        "Embedded widget returned failure",
+    )?;
+    // The standalone complete message contains both token and sToken. They
+    // have the same lexical shape; only the value bound to event=complete is
+    // the site's verification token. Never select an arbitrary opaque string.
+    data::one(values.windows(4).filter_map(|v| {
+        (v[..3] == ["cloudflare-challenge", "event", "complete"]
+            && (100..=16384).contains(&v[3].len())
+            && re(r"^[01]\.[A-Za-z0-9_.-]+$").is_match(v[3]))
+        .then_some(v[3])
+    }))
+}
+
+#[cfg(test)]
+mod embedded_completion_tests {
+    use super::*;
+    #[test]
+    fn completion_token_is_bound_to_the_complete_message_not_stoken() {
+        let token = format!("1.{}", "A".repeat(120));
+        let stoken = format!("1.{}", "B".repeat(120));
+        let values = [
+            "tokenExpired",
+            &token,
+            "cloudflare-challenge",
+            "event",
+            "complete",
+            &token,
+            "sToken",
+            &stoken,
+        ];
+        assert_eq!(embedded_token(&values).unwrap(), token);
+        assert!(embedded_token(&["sToken", &stoken]).is_err());
+        assert!(
+            embedded_token(&["cloudflare-challenge", "event", "complete", &token, "fail"]).is_err()
+        );
+        assert!(embedded_token(&[
+            "cloudflare-challenge",
+            "event",
+            "complete",
+            &token,
+            "cloudflare-challenge",
+            "event",
+            "complete",
+            &stoken
+        ])
+        .is_err());
+    }
+}
+
 impl Response {
+    pub fn widget_completion(&self) -> Result<Value> {
+        let values: Vec<_> = self.literals.iter().map(|l| l.value.as_str()).collect();
+        Ok(json!({"widgetToken":embedded_token(&values)?}))
+    }
     pub fn completion(&self) -> Result<Value> {
         let values: HashSet<_> = self.literals.iter().map(|l| l.value.as_str()).collect();
         require(!values.contains("fail"), "Child challenge returned failure")?;
@@ -211,7 +267,14 @@ pub enum Next {
     Work(Value),
 }
 pub fn next(response: &Response) -> Result<Next> {
-    if let Ok(done) = response.completion() {
+    next_for(response, false)
+}
+pub fn next_for(response: &Response, embedded: bool) -> Result<Next> {
+    if let Ok(done) = if embedded {
+        response.widget_completion()
+    } else {
+        response.completion()
+    } {
         return Ok(Next::Done(done));
     }
     require(

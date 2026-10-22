@@ -396,6 +396,40 @@ async fn cancelled_request_releases_active_statistics() {
     assert_eq!(s.status()["active"], 0);
     assert_eq!(s.status()["failed"], 1);
     assert_eq!(s.status()["recent"][0]["code"], "CANCELLED");
+    assert_eq!(s.status()["recent"][0]["stage"], "verifyingAndFetching");
+}
+#[tokio::test]
+async fn image_and_page_origins_share_response_cookies_only_within_the_same_client() {
+    let page = serve(
+        Router::new()
+            .fallback(|| async { ([("set-cookie", "reader=fixture; Path=/; HttpOnly")], "page") }),
+    )
+    .await;
+    let image = serve(Router::new().fallback(|r: Request| async move {
+        if r.headers()
+            .get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("reader=fixture"))
+        {
+            (StatusCode::OK, [("content-type", "image/png")], pixel()).into_response()
+        } else {
+            (StatusCode::FORBIDDEN, "missing reader context").into_response()
+        }
+    }))
+    .await;
+    let s = service();
+    s.fetch(json!({"url":page.url,"session":"reader"}), false, false)
+        .await
+        .unwrap();
+    let (_, bytes) = s
+        .image(json!({"url":image.url,"session":"reader"}))
+        .await
+        .unwrap();
+    assert_eq!(bytes, pixel());
+    assert!(s
+        .image(json!({"url":image.url,"session":"other-reader"}))
+        .await
+        .is_err());
 }
 #[tokio::test]
 async fn web_auth_source_address_and_raw_html_contracts() {
@@ -408,6 +442,33 @@ async fn web_auth_source_address_and_raw_html_contracts() {
         .to_str()
         .unwrap()
         .contains("script-src 'self'"));
+    assert_eq!(index.headers()["cache-control"], "no-store");
+    let html = index.text().await.unwrap();
+    let version = format!(
+        "v{} · {}",
+        cf_gateway::version::VERSION,
+        cf_gateway::version::build_id()
+    );
+    assert!(html.contains(&version));
+    assert!(!html.contains("{{VERSION}}"));
+    assert!(!html.contains("{{BUILD_ID}}"));
+    let status: serde_json::Value = client
+        .get(format!("{}/v1/status", server.url))
+        .bearer_auth("secret-local")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["version"], cf_gateway::version::VERSION);
+    assert_eq!(status["buildId"], cf_gateway::version::build_id());
+    assert!(
+        cf_gateway::version::build_id().len() == 12
+            && cf_gateway::version::build_id()
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
+    );
     assert_eq!(
         client
             .get(format!("{}/v1/status", server.url))
@@ -511,6 +572,59 @@ async fn history_retains_replay_inputs_and_source_token_is_scoped_to_export() {
         assert!(script.contains("function cfDiscovery"));
         assert!(!script.contains("[CF comparison]"));
     }
+    let bundle = client
+        .get(format!("{}/sources.json", server.url))
+        .query(&[
+            ("base", "https://reader.example:8443/gateway"),
+            ("token", "local-only"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bundle.status(), 200);
+    assert_eq!(bundle.headers()["cache-control"], "no-store");
+    assert!(bundle.headers()["content-type"]
+        .to_str()
+        .unwrap()
+        .starts_with("application/json"));
+    let bundle: serde_json::Value = bundle.json().await.unwrap();
+    let rows = bundle.as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    let keys: std::collections::HashSet<_> = rows
+        .iter()
+        .map(|v| v["bookSourceUrl"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys.len(), 3);
+    for row in rows {
+        let script = row["mainJs"].as_str().unwrap();
+        assert!(script.contains("var CF_BASE = \"https://reader.example:8443/gateway\";"));
+        assert!(script.contains("var CF_TOKEN = \"local-only\";"));
+        assert!(script.contains("function search("));
+        assert!(script.contains("function getChapters("));
+        assert!(script.contains("function cfIntro("));
+    }
+    for path in ["/sources.json", "/sources.json?token=wrong"] {
+        assert_eq!(
+            client
+                .get(format!("{}{path}", server.url))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+    }
+    assert_eq!(
+        client
+            .get(format!("{}/sources.json", server.url))
+            .bearer_auth("local-only")
+            .query(&[("base", "https://reader.example/#fragment")])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
     assert_eq!(
         client
             .get(format!(
@@ -595,9 +709,19 @@ async fn image_proxy_preserves_decoded_bytes_scopes_auth_and_records_rejections(
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), 502);
+        assert_eq!(
+            response.status(),
+            if path == "/missing" { 404 } else { 502 }
+        );
         let error: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(error["code"], "IMAGE_UPSTREAM_ERROR");
+        assert_eq!(
+            error["code"],
+            if path == "/missing" {
+                "IMAGE_NOT_FOUND"
+            } else {
+                "IMAGE_UPSTREAM_ERROR"
+            }
+        );
     }
     let history: serde_json::Value = client
         .get(format!("{}/v1/history", server.url))

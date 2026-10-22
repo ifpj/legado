@@ -62,6 +62,27 @@ async fn plan(source: String, frame: bool) -> Result<Plan> {
         .await
         .map_err(|e| Error::new("COMPILER_ERROR", e.to_string()))?
 }
+
+pub(crate) async fn target(s: &Session, url: &str, deadline: Instant) -> Result<HttpResponse> {
+    if let Some(body) = crate::embedded::search_form(url)? {
+        s.request(
+            "POST",
+            url,
+            Some(body),
+            &[
+                ("content-type", "application/x-www-form-urlencoded".into()),
+                ("referer", origin(url)? + "/"),
+                ("sec-fetch-site", "same-origin".into()),
+                ("sec-fetch-mode", "navigate".into()),
+                ("sec-fetch-dest", "document".into()),
+            ],
+            deadline,
+        )
+        .await
+    } else {
+        s.request("GET", url, None, &[], deadline).await
+    }
+}
 impl Engine {
     pub fn capture(&self, content: &[u8], suffix: &str) -> Result<()> {
         if let Some(dir) = &self.capture_dir {
@@ -142,7 +163,7 @@ impl Engine {
         let mut current = if let Some(r) = response {
             r
         } else {
-            s.request("GET", url, None, &[], deadline).await?
+            target(&s, url, deadline).await?
         };
         let mut visited = std::collections::HashSet::new();
         let mut details_list: Vec<Value> = Vec::new();
@@ -175,17 +196,14 @@ impl Engine {
                 s.fallback(&current.url).await?;
                 fallback = true;
                 visited.clear();
-                current =
-                    s.request("GET", url, None, &[], deadline)
-                        .await
-                        .map_err(|mut error| {
-                            if !error.details.is_object() {
-                                error.details = json!({});
-                            }
-                            error.details["routeFallback"] =
-                                json!({"attempts":2,"from":"mapped","to":"direct"});
-                            error
-                        })?;
+                current = target(&s, url, deadline).await.map_err(|mut error| {
+                    if !error.details.is_object() {
+                        error.details = json!({});
+                    }
+                    error.details["routeFallback"] =
+                        json!({"attempts":2,"from":"mapped","to":"direct"});
+                    error
+                })?;
                 continue;
             }
             if fallback {
@@ -198,6 +216,46 @@ impl Engine {
                     502,
                     details,
                 ));
+            }
+            if challenge.kind == "embedded-turnstile" {
+                if analyze {
+                    return Ok(Outcome {
+                        response: current,
+                        details,
+                        solved: false,
+                        fallback,
+                    });
+                }
+                let widget =
+                    crate::embedded::recognize(&current.url, &current.text)?.ok_or_else(|| {
+                        Error::new("EMBEDDED_FORMAT_UNSUPPORTED", "嵌入式验证声明发生变化")
+                    })?;
+                let (next, summary) = self
+                    .embedded(s.clone(), &current, &widget, deadline)
+                    .await?;
+                details["embeddedVerification"] = summary;
+                let check =
+                    static_data::recognize(&next.url, next.status, &next.headers, &next.text)?;
+                if check.kind == "embedded-turnstile" {
+                    return Err(protocol_error(
+                        "EMBEDDED_NOT_SOLVED",
+                        "验证后仍返回站内验证页",
+                        422,
+                        json!({"status":next.status,"details":details}),
+                    ));
+                }
+                if check.kind == "none" || check.kind == "jsd-background" {
+                    require(
+                        next.status == 200,
+                        "Embedded verification target HTTP status",
+                    )?;
+                    details["embeddedVerification"]["strictPureAlgorithmAcceptance"] = json!(true);
+                    details["embeddedVerification"]["solved"] = json!(true);
+                }
+                details_list.push(details);
+                current = next;
+                solved = true;
+                continue;
             }
             if challenge.kind != "managed" {
                 if challenge.kind == "jsd" && !analyze {
@@ -226,7 +284,7 @@ impl Engine {
                         deadline,
                     )
                     .await?;
-                    current = s.request("GET", url, None, &[], deadline).await?;
+                    current = target(&s, url, deadline).await?;
                     let check = static_data::recognize(
                         &current.url,
                         current.status,
@@ -317,7 +375,12 @@ impl Engine {
                 || (next.status == 404
                     && matches!(checked.kind.as_str(), "none" | "jsd-background")
                     && next.text.len() >= 256);
-            if received && !matches!(checked.kind.as_str(), "managed" | "blocked" | "jsd") {
+            if received
+                && !matches!(
+                    checked.kind.as_str(),
+                    "managed" | "blocked" | "jsd" | "embedded-turnstile"
+                )
+            {
                 details["firstFlow"]["frameInitialization"]["strictPureAlgorithmAcceptance"] =
                     json!(true);
                 details["firstFlow"]["frameInitialization"]["solved"] = json!(true);
@@ -335,10 +398,11 @@ impl Engine {
                     fallback,
                 });
             }
-            if checked.kind == "managed"
-                && (origin(&next.url)? != origin(&current.url)?
-                    || (challenge.config["cType"] != "precursor_interstitial"
-                        && checked.config["cType"] == "precursor_interstitial"))
+            if checked.kind == "embedded-turnstile"
+                || checked.kind == "managed"
+                    && (origin(&next.url)? != origin(&current.url)?
+                        || (challenge.config["cType"] != "precursor_interstitial"
+                            && checked.config["cType"] == "precursor_interstitial"))
             {
                 current = next;
                 solved = true;
@@ -454,6 +518,7 @@ impl Engine {
                     &parameters,
                     string(&p.meta["build"])?,
                     deadline,
+                    None,
                 )
                 .await?;
             summary = frame_summary;
@@ -509,6 +574,11 @@ impl Engine {
             let target = completion::issued_url(&page.url, config)?;
             s.request("GET", &target, None, &[], deadline).await?
         };
+        let checked = if crate::embedded::search_form(&page.url)?.is_some() {
+            target(&s, &page.url, deadline).await?
+        } else {
+            checked
+        };
         self.capture(&checked.content, ".verification.html")?;
         Ok((
             checked,
@@ -523,6 +593,7 @@ impl Engine {
         parameters: &Value,
         build: &str,
         deadline: Instant,
+        embedded: Option<&crate::embedded::Widget>,
     ) -> Result<(Value, Value)> {
         let sitekey = string(&parameters["sitekey"])?;
         require(
@@ -536,7 +607,8 @@ impl Engine {
                     as char
             })
             .collect();
-        let url=format!("https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/f/av0/rch/{instance}/{sitekey}/light/fbE/new/normal?lang=auto");
+        let theme = if embedded.is_some() { "auto" } else { "light" };
+        let url=format!("https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/f/av0/rch/{instance}/{sitekey}/{theme}/fbE/new/normal?lang=auto");
         let born = epoch_ms();
         let frame = s
             .request(
@@ -590,17 +662,26 @@ impl Engine {
             &["yoFh0", "DstX3", "TYrU7", "cYUbN2", "DNCSh4"],
         );
         let elapsed = epoch_ms() - born;
+        let mode = if embedded.is_some() {
+            string(&config["RIQr4"])?
+        } else {
+            string(&root["cType"])?
+        };
         require(
-            matches!(
-                root["cType"].as_str(),
-                Some("managed" | "interactive" | "non-interactive")
-            ),
+            matches!(mode, "managed" | "interactive" | "non-interactive"),
             "Frame parent mode",
         )?;
         merge(
             &mut payload,
             &json!({"NOqLU5":root["cType"],"xmKtH5":root["cRay"],"Dtviy4":parameters["pageData"],"PHYjM2":build,"iiWo7":format!("https://challenges.cloudflare.com/turnstile/v0/b/{build}/api.js?onload=DraY9&render=explicit"),"jXAmp8":page.url,"dMNbG1":origin(&page.url)?,"tmhp0":elapsed,"ECvL0":elapsed,"wWyY1":0,"vlScl0":0,"jWijM3":0,"lVgt8":0,"fuhL4":elapsed,"ccKqy6":0,"jrshV1":0,"RxXRQ8":0,"nulf3":0,"rSaL2":config["MrbDg2"],"OtYa2":[],"jLEVv0":[],"mHsm4":elapsed,"URVD0":analysis_ms,"shUar7":analysis_ms,"ghqno0":analysis_ms}),
         );
+        if let Some(widget) = embedded {
+            // action, cData and chlPageData are absent in this site's render call.
+            // JSON.stringify omits undefined members; sending null or a managed
+            // page's ray here changes the standalone widget protocol.
+            remove(&mut payload, &["NOqLU5", "xmKtH5", "Dtviy4"]);
+            payload["iiWo7"] = json!(widget.api_url);
+        }
         let cipher = Cipher::new(&p.modulus, &p.alphabet, p.mask()?, None)?;
         let endpoint = format!(
             "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b{}{}/{}",
@@ -632,7 +713,7 @@ impl Engine {
             parent_html: &page.text,
             frame_url: &url,
             page_url: &page.url,
-            mode: string(&root["cType"])?,
+            mode,
         };
         let http_tasks = crate::http_tasks::tasks(&context, &config)?;
         let mut pending = Vec::new();
@@ -652,7 +733,7 @@ impl Engine {
             page.text.clone(),
             url.clone(),
             page.url.clone(),
-            string(&root["cType"])?.to_string(),
+            mode.to_string(),
         );
         let mut computed = tokio::task::spawn_blocking(move || {
             let (d, p, c, h, ph, fu, pu, m) = context_data;
@@ -753,7 +834,7 @@ impl Engine {
                 true,
             )
             .await?;
-        let o = match completion::next(&followup)? {
+        let o = match completion::next_for(&followup, embedded.is_some())? {
             completion::Next::Done(done) => {
                 summary["workTaskRequested"] = json!(false);
                 return Ok((done, summary));
@@ -842,7 +923,87 @@ impl Engine {
             .await?;
         summary["workTaskRequested"] = json!(true);
         summary["proofAttempts"] = json!(attempts);
-        Ok((complete.completion()?, summary))
+        Ok((
+            if embedded.is_some() {
+                complete.widget_completion()?
+            } else {
+                complete.completion()?
+            },
+            summary,
+        ))
+    }
+    async fn embedded(
+        &self,
+        s: Arc<Session>,
+        page: &HttpResponse,
+        widget: &crate::embedded::Widget,
+        deadline: Instant,
+    ) -> Result<(HttpResponse, Value)> {
+        self.capture(&page.content, ".embedded.html")?;
+        let api = s
+            .request(
+                "GET",
+                &widget.api_url,
+                None,
+                &[
+                    ("referer", page.url.clone()),
+                    ("sec-fetch-dest", "script".into()),
+                    ("sec-fetch-mode", "no-cors".into()),
+                    ("sec-fetch-site", "cross-site".into()),
+                ],
+                deadline,
+            )
+            .await?;
+        require(api.status == 200, "Embedded API HTTP status")?;
+        let build = crate::embedded::api_build(&api.url)?;
+        let (done, mut summary) = self
+            .frame(
+                s.clone(),
+                page,
+                &json!({}),
+                &json!({"sitekey":widget.sitekey}),
+                &build,
+                deadline,
+                Some(widget),
+            )
+            .await?;
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("verify_token", string(&done["widgetToken"])?)
+            .finish()
+            .into_bytes();
+        let response = s
+            .request(
+                "POST",
+                &widget.verify_url,
+                Some(body),
+                &[
+                    (
+                        "content-type",
+                        "application/x-www-form-urlencoded; charset=UTF-8".into(),
+                    ),
+                    ("x-requested-with", "XMLHttpRequest".into()),
+                    ("referer", page.url.clone()),
+                    (
+                        "accept",
+                        "application/json, text/javascript, */*; q=0.01".into(),
+                    ),
+                ],
+                deadline,
+            )
+            .await?;
+        require(
+            response.status == 200 && origin(&response.url)? == origin(&page.url)?,
+            "Site verification HTTP status",
+        )?;
+        self.capture(&response.content, ".embedded-verification.json")?;
+        let cookie = crate::embedded::response_cookie(&serde_json::from_str(&response.text)?)?;
+        s.cookies.add(cookie, &page.url);
+        let checked = target(&s, &page.url, deadline).await?;
+        self.capture(&checked.content, ".embedded-search.html")?;
+        summary["siteVerificationStatus"] = json!(response.status);
+        summary["verificationStatus"] = json!(checked.status);
+        summary["adapter"] = json!("69shuba-search");
+        Ok((checked, summary))
     }
 }
 pub fn calculate_all(c: &Context<'_>) -> Result<Results> {

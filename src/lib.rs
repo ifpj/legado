@@ -8,6 +8,7 @@ pub mod constants;
 pub mod css;
 pub mod data;
 pub mod declared;
+pub mod embedded;
 pub mod engine;
 pub mod html;
 pub mod http_tasks;
@@ -26,6 +27,7 @@ pub mod service;
 pub mod sources;
 pub mod static_data;
 pub mod surface;
+pub mod version;
 pub mod web;
 pub mod wire;
 

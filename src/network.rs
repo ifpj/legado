@@ -347,9 +347,15 @@ pub struct Session {
     origins: Mutex<HashSet<String>>,
 }
 impl Session {
-    pub fn new(mut dns: Dns, proxy: Option<String>) -> Result<Self> {
+    pub fn new(dns: Dns, proxy: Option<String>) -> Result<Self> {
+        Self::with_cookies(dns, proxy, Arc::new(Jar::default()))
+    }
+    pub(crate) fn with_cookies(
+        mut dns: Dns,
+        proxy: Option<String>,
+        cookies: Arc<Jar>,
+    ) -> Result<Self> {
         dns.mapped_hosts = Arc::default();
-        let cookies = Arc::new(Jar::default());
         let client = client(dns.clone(), cookies.clone(), proxy.as_deref())?;
         Ok(Self {
             client: RwLock::new(client),
@@ -388,22 +394,19 @@ impl Session {
             .lock()
             .unwrap()
             .insert(crate::static_data::origin(url)?);
-        let origins = self.origins.lock().unwrap().clone();
-        for cookie in self
+        // A shared browser context may also hold sibling-host and unrelated
+        // website cookies. Invalidate only credentials applicable to this URL.
+        let cookies = self
             .cookies
-            .get_all()
+            .matches(url)
             .filter(|c| matches!(c.name(), "cf_clearance" | "__cf_bm"))
-        {
+            .collect::<Vec<_>>();
+        for cookie in cookies {
             let path = cookie.path().unwrap_or("/");
-            if let Some(domain) = cookie.domain() {
-                self.cookies
-                    .remove(cookie.clone(), format!("https://{domain}{path}"));
-            } else {
-                for origin in &origins {
-                    self.cookies
-                        .remove(cookie.clone(), format!("{origin}{path}"));
-                }
-            }
+            self.cookies.remove(
+                cookie.clone(),
+                format!("{}{path}", crate::static_data::origin(url)?),
+            );
         }
         let replacement = client(
             self.dns.ordinary(),
@@ -885,6 +888,10 @@ mod regression {
         s.cookies.add("reader-login=private-test; Path=/", url);
         s.cookies.add("cf_clearance=old-route; Path=/", url);
         s.cookies.add("__cf_bm=old-route; Path=/", url);
+        s.cookies.add(
+            "cf_clearance=other-host; Path=/",
+            "https://image.novels.example/",
+        );
         assert!(!s.used_mapping(url));
         s.dns
             .mapped_hosts
@@ -900,6 +907,10 @@ mod regression {
             .map(|c| c.name().to_string())
             .collect::<Vec<_>>();
         assert_eq!(names, ["reader-login"]);
+        assert!(s
+            .cookies
+            .matches("https://image.novels.example/")
+            .any(|c| c.name() == "cf_clearance" && c.value() == "other-host"));
     }
     #[tokio::test]
     async fn engine_retries_only_the_initial_pinned_rejection_and_keeps_failure_context() {

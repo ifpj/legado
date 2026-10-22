@@ -374,6 +374,13 @@ pub fn recognize(
             script,
         });
     }
+    if let Some(widget) = crate::embedded::recognize(url, html)? {
+        return Ok(Challenge {
+            kind: "embedded-turnstile".into(),
+            config: json!({"sitekey":widget.sitekey,"adapter":"69shuba-search"}),
+            script: Some(widget.api_url),
+        });
+    }
     if let Some(config) = assignment(html, "__CF$cv$params")? {
         if config.get("r").is_some() && config.get("t").is_some() {
             let doc = scraper::Html::parse_document(html);
