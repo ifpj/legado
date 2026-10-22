@@ -46,6 +46,7 @@ Web 会自动适配暗色模式。接入示例页使用当前访问地址的域�
 | --- | --- | --- |
 | POST | /v1/fetch | 获取网页，返回 JSON |
 | GET | /fetch?url=…&session=… | 返回 HTML 和网站原始 HTTP 状态 |
+| GET | /image?url=…&session=… | 原始图片代取，共用验证会话 |
 | POST | /v1/solve | 获取验证结果与匹配目标 URL 的 Cookie |
 | POST | /v1/analyze | 分析，不提交验证 |
 | GET | /v1/status | 运行状态和最近 30 条记录 |
@@ -66,7 +67,7 @@ proxy 可选，支持 HTTP/HTTPS/SOCKS。timeoutMs 范围 1000～120000，包含
 
 /v1/fetch 的 ok=true 表示拿到网站实际响应，status 可能是网站的 404。协议或传输失败返回 ok=false、code、error、details。Web 将处理失败与网站 HTTP 错误分开显示。
 
-书源采用代取模式。跨出口复用 Cookie 不保证可用。阅读的网络导入不能设置请求头，因此只有只读 /source.js 额外接受 token 查询参数；Web 会在启用令牌时生成相应导入链接。链接包含服务令牌，请按凭证保管。其他 API 仍只接受 Authorization 请求头。令牌不会转发给目标网站。
+书源采用代取模式。跨出口复用 Cookie 不保证可用。阅读的网络导入不能设置请求头，因此只读的 /source.js 与 /image 额外接受 token 查询参数；Web 会在启用令牌时生成相应导入链接。链接包含服务令牌，请按凭证保管。其他 API 仍只接受 Authorization 请求头。令牌不会转发给目标网站。封面统一通过 /image 代取，避免手机直连时遇到 403；该接口保持原始二进制，仅接受可识别签名的 PNG/JPEG/GIF/WebP/AVIF，不转发 SVG 或 HTML。
 
 ## 构建
 

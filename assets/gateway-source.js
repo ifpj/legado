@@ -25,8 +25,13 @@ function cfRead(url) {
 function cfDocument(html){return Packages.org.jsoup.Jsoup.parse(String(html),CF_SITE+'/');}
 function cfDoc(url){return Packages.org.jsoup.Jsoup.parse(cfRead(url),cfUrl(url));}
 function cfText(node){return node?String(java.t2s(String(node.text()).trim())):'';}
-function cfImage(item){var img=item.selectFirst('img');if(!img)return '';for(var i=0,attrs=['data-original','data-src','src'];i<attrs.length;i++){if(img.hasAttr(attrs[i]))return String(img.absUrl(attrs[i])).replace(/^http:/,'https:');}return '';}
-function cfSimple(value){var keys=['name','author','kind','intro','latestChapterTitle','title','wordCount'];if(value instanceof Array){for(var i=0;i<value.length;i++)cfSimple(value[i]);}else if(value){for(var j=0;j<keys.length;j++)if(value[keys[j]])value[keys[j]]=java.t2s(String(value[keys[j]]));}return value;}
+function cfCover(url){
+    url=String(url||'').replace(/^http:/,'https:');if(!url)return '';
+    if(url.indexOf(CF_BASE+'/image?')===0)return url;
+    return CF_BASE+'/image?url='+encodeURIComponent(url)+'&session='+encodeURIComponent(cfSession())+(CF_TOKEN?'&token='+encodeURIComponent(CF_TOKEN):'');
+}
+function cfImage(item){var img=item.selectFirst('img');if(!img)return '';for(var i=0,attrs=['data-original','data-src','src'];i<attrs.length;i++){if(img.hasAttr(attrs[i]))return cfCover(String(img.absUrl(attrs[i])));}return '';}
+function cfSimple(value){var keys=['name','author','kind','intro','latestChapterTitle','title','wordCount'];if(value instanceof Array){for(var i=0;i<value.length;i++)cfSimple(value[i]);}else if(value){for(var j=0;j<keys.length;j++)if(value[keys[j]])value[keys[j]]=java.t2s(String(value[keys[j]]));if(value.coverUrl)value.coverUrl=cfCover(value.coverUrl);}return value;}
 function cfNextPage(doc,href,page){
     var links=doc.select('a[href]');for(var i=0;i<links.size();i++){var a=links.get(i),text=String(a.text()).trim();if(/^(下一頁|下一页|下頁|下页|下一页>|>|›|»)$/.test(text))return String(a.absUrl('href'));}
     return '';

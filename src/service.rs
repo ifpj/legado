@@ -119,6 +119,20 @@ impl Service {
         json!({"items":stats.history,"limit":200,"requests":stats.total,"persistent":false})
     }
     pub async fn fetch(&self, options: Value, analyze: bool, export: bool) -> Result<Value> {
+        self.execute(options, analyze, export, false)
+            .await
+            .map(|(v, _)| v)
+    }
+    pub async fn image(&self, options: Value) -> Result<(Value, Vec<u8>)> {
+        self.execute(options, false, false, true).await
+    }
+    async fn execute(
+        &self,
+        options: Value,
+        analyze: bool,
+        export: bool,
+        image: bool,
+    ) -> Result<(Value, Vec<u8>)> {
         let object = options
             .as_object()
             .ok_or_else(|| bad("INVALID_REQUEST", "请求必须为 JSON 对象"))?;
@@ -171,7 +185,9 @@ impl Service {
         let session = self.session(url, name, proxy.clone())?;
         let start = Instant::now();
         let deadline = start + Duration::from_secs_f64(timeout / 1000.);
-        let operation = if analyze {
+        let operation = if image {
+            "image"
+        } else if analyze {
             "analyze"
         } else if export {
             "solve"
@@ -274,6 +290,12 @@ impl Service {
             e.status = 504;
             Err(e)
         });
+        let outcome = outcome.and_then(|(outcome, queue)| {
+            if image {
+                image_type(&outcome.response)?;
+            }
+            Ok((outcome, queue))
+        });
         let total_ms = start.elapsed().as_secs_f64() * 1000.;
         let result = match outcome {
             Ok((outcome, queue_ms)) => {
@@ -281,7 +303,7 @@ impl Service {
                 record["status"] = json!(outcome.response.status);
                 record["challenge"] = outcome.details["type"].clone();
                 record["queueMs"] = json!(queue_ms);
-                record["bytes"] = json!(outcome.response.text.len());
+                record["bytes"] = json!(outcome.response.content.len());
                 record["route"] = json!(if proxy.is_some() {
                     "proxy"
                 } else if session.used_mapping(&outcome.response.url) {
@@ -290,7 +312,22 @@ impl Service {
                     "direct"
                 });
                 record["routeFallback"] = json!(outcome.fallback);
+                let image_kind = if image {
+                    Some(image_type(&outcome.response).unwrap())
+                } else {
+                    None
+                };
+                let bytes = if image {
+                    outcome.response.content
+                } else {
+                    Vec::new()
+                };
                 let mut value = json!({"ok":true,"status":outcome.response.status,"url":outcome.response.url,"headers":outcome.response.headers,"body":outcome.response.text,"userAgent":USER_AGENT,"challenge":outcome.details,"contentCached":false,"precomputedEnvironmentProfile":false,"strictPureAlgorithmAcceptance":outcome.solved,"analyzed":analyze,"timings":{"queueMs":queue_ms,"totalMs":total_ms}});
+                if let Some(kind) = image_kind {
+                    value.as_object_mut().unwrap().remove("body");
+                    value["imageType"] = json!(kind);
+                    value["bytes"] = json!(bytes.len());
+                }
                 if export {
                     value.as_object_mut().unwrap().remove("body");
                     value["credentials"] = credentials(&session, value["url"].as_str().unwrap())?;
@@ -298,7 +335,7 @@ impl Service {
                 let mut stats = self.stats.lock().unwrap();
                 stats.success += 1;
                 stats.strict |= outcome.solved;
-                Ok(value)
+                Ok((value, bytes))
             }
             Err(error) => {
                 record["ok"] = json!(false);
@@ -321,6 +358,35 @@ impl Service {
         active.completed = true;
         result
     }
+}
+fn image_type(response: &crate::network::HttpResponse) -> Result<&'static str> {
+    let b = &response.content;
+    let kind = if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if b.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if b.starts_with(b"RIFF") && b.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else if b.get(4..8) == Some(b"ftyp") && matches!(b.get(8..12), Some(b"avif" | b"avis")) {
+        Some("image/avif")
+    } else {
+        None
+    };
+    if response.status == 200 {
+        if let Some(kind) = kind {
+            return Ok(kind);
+        }
+    }
+    let mut error = Error::new(
+        "IMAGE_UPSTREAM_ERROR",
+        "未取得有效的 PNG/JPEG/GIF/WebP/AVIF 图片",
+    );
+    error.status = 502;
+    error.details =
+        json!({"status":response.status,"contentType":response.headers.get("content-type")});
+    Err(error)
 }
 fn credentials(s: &Session, url: &str) -> Result<Value> {
     let parsed = validate_url(url)?;

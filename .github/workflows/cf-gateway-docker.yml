@@ -51,6 +51,7 @@ jobs:
           cache-from: type=gha,scope=cf-gateway-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=cf-gateway-${{ matrix.arch }}
       - name: Verify actual container
+        timeout-minutes: 3
         run: |
           trap 'docker logs cf-smoke 2>/dev/null || true; docker rm -f cf-smoke >/dev/null 2>&1 || true' EXIT
           for token in "" "ci-test-token"; do

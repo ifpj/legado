@@ -25,6 +25,10 @@ use std::{
 };
 
 const ALPHABET: &str = "7KcLp9tIZ2Su+xagjiv05Q$EbdyoOU8rPT3qkCRXGshWnfDmw4zHJYF1Al-VNBe6M";
+fn pixel() -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aU1sAAAAASUVORK5CYII=").unwrap()
+}
 #[derive(Default)]
 struct Counters {
     get: AtomicUsize,
@@ -60,7 +64,7 @@ async fn upstream(State(c): State<Arc<Counters>>, r: Request) -> Response {
     }
     let ordinal = c.get.fetch_add(1, Ordering::SeqCst) + 1;
     match path {
-        "/jsd"|"/reject" if !r.headers().get("cookie").and_then(|h|h.to_str().ok()).is_some_and(|h|h.contains("cf_clearance=fixture"))||path=="/reject" => {
+        "/jsd"|"/cover-shielded"|"/reject" if !r.headers().get("cookie").and_then(|h|h.to_str().ok()).is_some_and(|h|h.contains("cf_clearance=fixture"))||path=="/reject" => {
             let html="<html><body><script>window.__CF$cv$params={r:'0123456789abcdef',t:'MTc5MjQ4MDAwMA=='};</script></body></html>";
             (StatusCode::FORBIDDEN,[("content-type","text/html")],html).into_response()
         }
@@ -73,6 +77,9 @@ async fn upstream(State(c): State<Arc<Counters>>, r: Request) -> Response {
         "/bomb" => {let mut encoder=GzEncoder::new(Vec::new(),Compression::fast());encoder.write_all(&vec![b'x';8*1024*1024+1]).unwrap();(StatusCode::OK,[("content-encoding","gzip")],encoder.finish().unwrap()).into_response()}
         "/cookie" => r.headers().get("cookie").and_then(|h|h.to_str().ok()).unwrap_or("").to_string().into_response(),
         "/invalid-encoding" => (StatusCode::OK,[("content-encoding","unsupported-test-encoding")],"invalid response").into_response(),
+        "/cover"|"/cover-shielded" => (StatusCode::OK,[("content-type","image/png")],pixel()).into_response(),
+        "/cover-gzip" => {let mut encoder=GzEncoder::new(Vec::new(),Compression::fast());encoder.write_all(&pixel()).unwrap();(StatusCode::OK,[("content-type","image/png"),("content-encoding","gzip")],encoder.finish().unwrap()).into_response()},
+        "/cover-svg" => (StatusCode::OK,[("content-type","image/svg+xml")],"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>").into_response(),
         "/headers" => axum::Json(r.headers().iter().map(|(k,v)|(k.to_string(),json!(v.to_str().unwrap_or("")))).collect::<serde_json::Map<_,_>>()).into_response(),
         _ => {
             let active=c.active.fetch_add(1,Ordering::SeqCst)+1;c.maximum.fetch_max(active,Ordering::SeqCst);
@@ -542,6 +549,76 @@ async fn history_retains_replay_inputs_and_source_token_is_scoped_to_export() {
             .unwrap()
             .headers()["content-type"],
         "image/png"
+    );
+}
+#[tokio::test]
+async fn image_proxy_preserves_decoded_bytes_scopes_auth_and_records_rejections() {
+    let (upstream, c) = fixture().await;
+    let server = serve(web::router(service(), "image-secret".into())).await;
+    let client = wreq::Client::builder().no_proxy().build().unwrap();
+    assert_eq!(
+        client
+            .get(format!("{}/image", server.url))
+            .query(&[("url", upstream.url.clone() + "/cover")])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    for path in ["/cover", "/cover-gzip", "/cover-shielded"] {
+        let response = client
+            .get(format!("{}/image", server.url))
+            .query(&[
+                ("url", upstream.url.clone() + path),
+                ("session", format!("image-{path}")),
+                ("token", "image-secret".into()),
+            ])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "image/png");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(response.bytes().await.unwrap().as_ref(), pixel().as_slice());
+    }
+    assert!(
+        c.post.load(Ordering::SeqCst) > 0,
+        "The image path must also complete an actual verification round trip"
+    );
+    for path in ["/plain", "/cover-svg", "/missing"] {
+        let response = client
+            .get(format!("{}/image", server.url))
+            .query(&[("url", upstream.url.clone() + path)])
+            .bearer_auth("image-secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 502);
+        let error: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(error["code"], "IMAGE_UPSTREAM_ERROR");
+    }
+    let history: serde_json::Value = client
+        .get(format!("{}/v1/history", server.url))
+        .bearer_auth("image-secret")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(history["items"][0]["operation"], "image");
+    assert_eq!(history["items"][0]["ok"], false);
+    assert!(!history.to_string().contains("image-secret"));
+    assert_eq!(
+        client
+            .get(format!("{}/fetch?token=image-secret", server.url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
     );
 }
 #[tokio::test]

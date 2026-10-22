@@ -43,6 +43,22 @@ fn authorized(app: &App, headers: &HeaderMap) -> Result<()> {
         Err(e)
     }
 }
+fn authorized_readonly_link(
+    app: &App,
+    headers: &HeaderMap,
+    query: &HashMap<String, String>,
+) -> Result<()> {
+    let mut supplied = headers.clone();
+    if !supplied.contains_key(header::AUTHORIZATION) {
+        if let Some(value) = query
+            .get("token")
+            .and_then(|t| format!("Bearer {t}").parse().ok())
+        {
+            supplied.insert(header::AUTHORIZATION, value);
+        }
+    }
+    authorized(app, &supplied)
+}
 fn send(status: StatusCode, body: String, kind: &str) -> Response {
     let mut response = (status, body).into_response();
     let h = response.headers_mut();
@@ -153,6 +169,36 @@ async fn fetch_html(
     }
     Ok(response)
 }
+async fn fetch_image(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Query(mut query): Query<HashMap<String, String>>,
+) -> Result<Response> {
+    authorized_readonly_link(&app, &headers, &query)?;
+    query.remove("token");
+    let mut options = serde_json::to_value(query)?;
+    if let Some(timeout) = options["timeoutMs"].as_str() {
+        options["timeoutMs"] = timeout
+            .parse::<u64>()
+            .map(Value::from)
+            .unwrap_or(Value::Null);
+    }
+    let (value, bytes) = app.service.image(options).await?;
+    let mut response = bytes.into_response();
+    let h = response.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        value["imageType"].as_str().unwrap().parse().unwrap(),
+    );
+    h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    h.insert("x-content-type-options", "nosniff".parse().unwrap());
+    h.insert("referrer-policy", "no-referrer".parse().unwrap());
+    h.insert(
+        "content-security-policy",
+        "default-src 'none'; sandbox".parse().unwrap(),
+    );
+    Ok(response)
+}
 pub fn source(base: &str, token: &str) -> Result<String> {
     crate::sources::render("twkan", base, token)
 }
@@ -161,18 +207,8 @@ async fn source_js(
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response> {
-    // Legado's network importer cannot attach custom headers. Only this
-    // read-only source export accepts the token in its URL.
-    let mut source_headers = headers.clone();
-    if !source_headers.contains_key(header::AUTHORIZATION) {
-        if let Some(value) = query
-            .get("token")
-            .and_then(|t| format!("Bearer {t}").parse().ok())
-        {
-            source_headers.insert(header::AUTHORIZATION, value);
-        }
-    }
-    authorized(&app, &source_headers)?;
+    // Source import and image loading cannot attach custom headers.
+    authorized_readonly_link(&app, &headers, &query)?;
     let fallback = format!(
         "http://{}",
         headers
@@ -213,6 +249,7 @@ pub fn router(service: Service, token: String) -> Router {
         .route("/v1/history", get(history))
         .route("/source.js", get(source_js))
         .route("/fetch", get(fetch_html))
+        .route("/image", get(fetch_image))
         .route("/v1/fetch", post(fetch_json))
         .route("/v1/solve", post(solve))
         .route("/v1/analyze", post(analyze))
