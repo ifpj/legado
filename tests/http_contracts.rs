@@ -104,10 +104,149 @@ fn service() -> Service {
     Service::new(Engine::default()).unwrap()
 }
 fn session() -> Session {
-    Session::new(Dns::new(false).unwrap(), None).unwrap()
+    Session::new(
+        Dns::new(&cf_gateway::network::NetworkConfig::default()).unwrap(),
+        None,
+    )
+    .unwrap()
 }
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)
+}
+
+#[tokio::test]
+async fn default_network_settings_and_optional_mapping_preserve_legacy_requests() {
+    let (server, _) = fixture().await;
+    let service = service();
+    assert_eq!(service.status()["runtime"]["networkMode"], "direct");
+    assert_eq!(service.status()["runtime"]["dnsMode"], "system");
+    for mapping in [None, Some(json!(null)), Some(json!({}))] {
+        let mut options = json!({"url":format!("{}/fresh",server.url),"session":"legacy"});
+        if let Some(mapping) = mapping {
+            options["connectTo"] = mapping;
+        }
+        assert_eq!(
+            service.fetch(options, false, false).await.unwrap()["ok"],
+            true
+        );
+    }
+    assert_eq!(service.status()["runtime"]["sessions"], 1);
+}
+
+#[tokio::test]
+async fn get_post_and_image_mapping_parameters_are_optional_and_share_the_same_contract() {
+    let (server, _) = fixture().await;
+    let api = serve(web::router(service(), "".into())).await;
+    let client = wreq::Client::builder().no_proxy().build().unwrap();
+    let mapping = json!({"localhost:1":server.url.trim_start_matches("http://")});
+    for path in ["/fetch", "/image"] {
+        let target = if path == "/image" {
+            "http://localhost:1/cover"
+        } else {
+            "http://localhost:1/fresh"
+        };
+        let response = client
+            .get(format!("{}{path}", api.url))
+            .query(&[
+                ("url", target.to_string()),
+                ("connectTo", mapping.to_string()),
+            ])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        if path == "/image" {
+            assert_eq!(response.bytes().await.unwrap().as_ref(), pixel());
+        } else {
+            assert!(response.text().await.unwrap().contains("fresh /fresh"));
+        }
+    }
+    let response = client
+        .post(format!("{}/v1/fetch", api.url))
+        .json(&json!({"url":"http://localhost:1/fresh","connectTo":mapping}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let value: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(value["status"], 200);
+    let response = client
+        .get(format!("{}/fetch", api.url))
+        .query(&[("url", server.url.as_str()), ("connectTo", "not-json")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["code"],
+        "INVALID_CONNECT_TO"
+    );
+    let legacy = client
+        .get(format!("{}/fetch", api.url))
+        .query(&[("url", format!("{}/fresh", server.url))])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legacy.status(), 200);
+}
+
+#[tokio::test]
+async fn nested_network_is_supported_by_json_and_query_endpoints() {
+    let (server, _) = fixture().await;
+    let api = serve(web::router(service(), "".into())).await;
+    let client = wreq::Client::builder().no_proxy().build().unwrap();
+    let network = json!({"proxy":null,"doh":{"enabled":false},"mapping":{"*":server.url.trim_start_matches("http://")}});
+    for path in ["/fetch", "/image"] {
+        let target = if path == "/image" {
+            "http://unresolved.invalid:1/cover"
+        } else {
+            "http://unresolved.invalid:1/fresh"
+        };
+        let response = client
+            .get(format!("{}{path}", api.url))
+            .query(&[
+                ("url", target.to_string()),
+                ("network", network.to_string()),
+            ])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        if path == "/image" {
+            assert_eq!(response.bytes().await.unwrap().as_ref(), pixel());
+        } else {
+            assert!(response.text().await.unwrap().contains("fresh /fresh"));
+        }
+    }
+    for operation in ["fetch", "analyze", "solve"] {
+        let response = client
+            .post(format!("{}/v1/{operation}", api.url))
+            .json(&json!({"url":"http://unresolved.invalid:1/fresh","network":network}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["status"],
+            200
+        );
+    }
+    let invalid = client
+        .get(format!("{}/fetch", api.url))
+        .query(&[("url", server.url.as_str()), ("network", "{\"doh\":true}")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), 400);
+    let index = client
+        .get(&api.url)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(index.contains("id=\"network-options\""));
 }
 
 #[tokio::test]

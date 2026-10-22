@@ -1,6 +1,6 @@
 [package]
 name = "cf-gateway"
-version = "0.2.6"
+version = "0.2.8"
 edition = "2021"
 publish = false
 license = "GPL-3.0-only"
@@ -41,6 +41,12 @@ cssparser = "0.35.0"
 wasmtime = { version = "49.0.0", default-features = false, features = ["cranelift", "runtime", "std"] }
 crc32fast = "1.5.0"
 async-compression = { version = "0.4.51", features = ["tokio", "gzip", "zlib", "brotli", "zstd"] }
+
+btls = "=0.5.6"
+tokio-btls = "=0.5.6"
+tokio-socks = "=0.5.3"
+percent-encoding = "=2.3.2"
+webpki-root-certs = "=1.0.10"
 
 [profile.release]
 opt-level = 3

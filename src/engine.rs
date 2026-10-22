@@ -28,7 +28,6 @@ pub struct Outcome {
     pub response: HttpResponse,
     pub details: Value,
     pub solved: bool,
-    pub fallback: bool,
 }
 fn merge(target: &mut Value, source: &Value) {
     target
@@ -167,7 +166,6 @@ impl Engine {
         };
         let mut visited = std::collections::HashSet::new();
         let mut details_list: Vec<Value> = Vec::new();
-        let mut fallback = false;
         let mut solved = false;
         for _ in 0..4 {
             let challenge = static_data::recognize(
@@ -185,30 +183,6 @@ impl Engine {
             );
             require(visited.insert(identity), "Challenge redirect loop")?;
             let mut details = json!({"type":challenge.kind,"ray":challenge.config.get("cRay").or_else(||challenge.config.get("r")),"configFields":challenge.config.as_object().map(|o|o.keys().collect::<Vec<_>>()),"script":challenge.script.as_ref().and_then(|s|url::Url::parse(s).ok()).map(|u|u.path().to_string())});
-            if !analyze
-                && !fallback
-                && visited.len() == 1
-                && current.status == 403
-                && challenge.kind != "managed"
-                && current.headers.contains_key("cf-ray")
-                && s.used_mapping(&current.url)
-            {
-                s.fallback(&current.url).await?;
-                fallback = true;
-                visited.clear();
-                current = target(&s, url, deadline).await.map_err(|mut error| {
-                    if !error.details.is_object() {
-                        error.details = json!({});
-                    }
-                    error.details["routeFallback"] =
-                        json!({"attempts":2,"from":"mapped","to":"direct"});
-                    error
-                })?;
-                continue;
-            }
-            if fallback {
-                details["routeFallback"] = json!({"attempts":2,"from":"mapped","to":"direct"});
-            }
             if challenge.kind == "blocked" {
                 return Err(protocol_error(
                     "UPSTREAM_BLOCKED",
@@ -223,7 +197,6 @@ impl Engine {
                         response: current,
                         details,
                         solved: false,
-                        fallback,
                     });
                 }
                 let widget =
@@ -305,7 +278,6 @@ impl Engine {
                         response: current,
                         details,
                         solved: false,
-                        fallback,
                     });
                 }
                 if let Some(first) = details_list.first() {
@@ -317,7 +289,6 @@ impl Engine {
                     response: current,
                     details,
                     solved,
-                    fallback,
                 });
             }
             self.capture(&current.content, ".html")?;
@@ -353,7 +324,6 @@ impl Engine {
                     response: current,
                     details,
                     solved: false,
-                    fallback,
                 });
             }
             let (next, flow_details) = self
@@ -395,7 +365,6 @@ impl Engine {
                     response: next,
                     details,
                     solved: true,
-                    fallback,
                 });
             }
             if checked.kind == "embedded-turnstile"
@@ -718,11 +687,8 @@ impl Engine {
         let http_tasks = crate::http_tasks::tasks(&context, &config)?;
         let mut pending = Vec::new();
         for task in http_tasks {
-            pending.push(tokio::spawn(crate::http_tasks::run(
-                task,
-                s.clone(),
-                url.clone(),
-                deadline,
+            pending.push(tokio::spawn(crate::network::inherit_context(
+                crate::http_tasks::run(task, s.clone(), url.clone(), deadline),
             )));
         }
         let context_data = (

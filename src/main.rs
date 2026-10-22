@@ -1,9 +1,27 @@
+use cf_gateway::network::{NetworkConfig, NetworkMode, DOH_URL};
 use cf_gateway::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser)]
 struct Args {
+    #[arg(
+        long,
+        value_enum,
+        help = "Network route [env: CF_GATEWAY_NETWORK_MODE] [default: direct]",
+        global = true
+    )]
+    network_mode: Option<NetworkMode>,
+    #[arg(long, global = true, help = "Upstream proxy [env: CF_GATEWAY_PROXY]")]
+    proxy: Option<String>,
+    #[arg(long, global=true, action=clap::ArgAction::Set, help="Enable DoH [env: CF_GATEWAY_DOH] [default: false]")]
+    doh: Option<bool>,
+    #[arg(
+        long,
+        global = true,
+        help = "DoH HTTPS endpoint [env: CF_GATEWAY_DOH_URL]"
+    )]
+    doh_url: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -59,7 +77,11 @@ enum Command {
     },
 }
 async fn execute() -> Result<()> {
-    match Args::parse().command.unwrap_or(Command::Serve {
+    let args = Args::parse();
+    let network = args
+        .network_config(|key| std::env::var(key).ok())
+        .unwrap_or_else(|error| error.exit());
+    match args.command.unwrap_or(Command::Serve {
         host: "127.0.0.1".into(),
         port: 19686,
         token: std::env::var("CF_GATEWAY_TOKEN").unwrap_or_default(),
@@ -83,7 +105,10 @@ async fn execute() -> Result<()> {
             capture_dir,
         } => {
             cf_gateway::web::serve(
-                cf_gateway::service::Service::new(cf_gateway::engine::Engine { capture_dir })?,
+                cf_gateway::service::Service::with_network(
+                    cf_gateway::engine::Engine { capture_dir },
+                    network.clone(),
+                )?,
                 &host,
                 port,
                 token,
@@ -98,8 +123,8 @@ async fn execute() -> Result<()> {
         } => {
             let engine = cf_gateway::engine::Engine { capture_dir };
             let session = std::sync::Arc::new(cf_gateway::network::Session::new(
-                cf_gateway::network::Dns::new(true)?,
-                None,
+                cf_gateway::network::Dns::new(&network)?,
+                network.proxy.clone(),
             )?);
             let started = std::time::Instant::now();
             let result = engine
@@ -182,6 +207,50 @@ async fn execute() -> Result<()> {
         }
     }
 }
+impl Args {
+    fn network_config(
+        &self,
+        environment: impl Fn(&str) -> Option<String>,
+    ) -> std::result::Result<NetworkConfig, clap::Error> {
+        let bad = |message: String| clap::Error::raw(clap::error::ErrorKind::InvalidValue, message);
+        let mode = if let Some(mode) = self.network_mode {
+            mode
+        } else {
+            NetworkMode::from_str(
+                &environment("CF_GATEWAY_NETWORK_MODE").unwrap_or_else(|| "direct".into()),
+                false,
+            )
+            .map_err(bad)?
+        };
+        let doh = if let Some(enabled) = self.doh {
+            enabled
+        } else {
+            match environment("CF_GATEWAY_DOH").as_deref().unwrap_or("false") {
+                "true" | "1" => true,
+                "false" | "0" => false,
+                _ => return Err(bad("CF_GATEWAY_DOH needs true/false".into())),
+            }
+        };
+        let proxy = self
+            .proxy
+            .clone()
+            .or_else(|| environment("CF_GATEWAY_PROXY"))
+            .filter(|v| !v.is_empty());
+        let doh_url = self
+            .doh_url
+            .clone()
+            .or_else(|| environment("CF_GATEWAY_DOH_URL"))
+            .unwrap_or_else(|| DOH_URL.into());
+        let config = NetworkConfig {
+            mode,
+            proxy,
+            doh,
+            doh_url,
+        };
+        config.validate().map_err(|error| bad(error.to_string()))?;
+        Ok(config)
+    }
+}
 fn main() {
     let result = std::thread::Builder::new()
         .name("cf-gateway".into())
@@ -200,5 +269,54 @@ fn main() {
     if let Err(error) = result {
         eprintln!("{}", error.reply());
         std::process::exit(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn defaults_are_direct_system_dns_and_arguments_override_environment() {
+        let args = Args::try_parse_from(["cf-gateway"]).unwrap();
+        let config = args.network_config(|_| None).unwrap();
+        assert_eq!(config.mode, NetworkMode::Direct);
+        assert!(!config.doh);
+        let args = Args::try_parse_from([
+            "cf-gateway",
+            "serve",
+            "--network-mode",
+            "proxy",
+            "--proxy",
+            "http://127.0.0.1:7890",
+            "--doh=false",
+            "--doh-url",
+            DOH_URL,
+        ])
+        .unwrap();
+        let config = args.network_config(|_| Some("invalid".into())).unwrap();
+        assert_eq!(config.mode, NetworkMode::Proxy);
+        assert!(!config.doh);
+        assert_eq!(config.proxy.as_deref(), Some("http://127.0.0.1:7890"));
+        for value in ["fixed", "hybrid", "doh"] {
+            assert!(Args::try_parse_from(["cf-gateway", "--network-mode", value]).is_err());
+        }
+    }
+    #[test]
+    fn startup_requires_proxy_and_validates_dns_settings() {
+        let args = Args::try_parse_from(["cf-gateway", "--network-mode", "proxy"]).unwrap();
+        assert!(args.network_config(|_| None).is_err());
+        let args = Args::try_parse_from(["cf-gateway"]).unwrap();
+        assert!(args
+            .network_config(|key| (key == "CF_GATEWAY_DOH").then(|| "invalid".into()))
+            .is_err());
+        let config = args
+            .network_config(|key| match key {
+                "CF_GATEWAY_DOH" => Some("true".into()),
+                "CF_GATEWAY_DOH_URL" => Some("https://dns.example/dns-query".into()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(config.doh);
+        assert_eq!(config.doh_url, "https://dns.example/dns-query");
     }
 }

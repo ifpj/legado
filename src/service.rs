@@ -1,7 +1,7 @@
 use crate::{
     engine::Engine,
     epoch_ms,
-    network::{Dns, Session, USER_AGENT},
+    network::{ConnectTo, Dns, NetworkConfig, RequestContext, Session, USER_AGENT},
     static_data::{origin, recognize, validate_url},
     Error, Result,
 };
@@ -55,6 +55,7 @@ impl Drop for ActiveRequest<'_> {
 }
 pub struct Service {
     engine: Engine,
+    network: NetworkConfig,
     dns: Dns,
     sessions: Mutex<HashMap<(String, String, Option<String>), Entry>>,
     cookie_contexts: Mutex<HashMap<(String, Option<String>), Weak<wreq::cookie::Jar>>>,
@@ -68,9 +69,13 @@ fn bad(code: &str, message: &str) -> Error {
 }
 impl Service {
     pub fn new(engine: Engine) -> Result<Self> {
+        Self::with_network(engine, NetworkConfig::default())
+    }
+    pub fn with_network(engine: Engine, network: NetworkConfig) -> Result<Self> {
         Ok(Self {
             engine,
-            dns: Dns::new(true)?,
+            dns: Dns::new(&network)?,
+            network,
             sessions: Mutex::default(),
             cookie_contexts: Mutex::default(),
             stats: Mutex::default(),
@@ -141,7 +146,7 @@ impl Service {
         let pid = sysinfo::Pid::from_u32(std::process::id());
         system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
         let rss = system.process(pid).map(|p| p.memory());
-        json!({"service":"cf-gateway-rust","version":crate::version::VERSION,"buildId":crate::version::build_id(),"mode":"pure-algorithm","precomputedEnvironmentProfile":false,"strictPureAlgorithmAcceptance":stats.strict,"uptimeSeconds":self.started.elapsed().as_secs(),"requests":stats.total,"active":stats.active,"success":stats.success,"failed":stats.failed,"runtime":{"language":"Rust","python":null,"rustEnabled":true,"rssBytes":rss,"sessions":sessions,"verifiedReadConcurrency":4,"responseCache":false,"defaultMode":"relay"},"recent":stats.recent,"sessionDetails":session_details,"capabilities":{"nativeHttp":true,"managedChallenge":"native-rust-protocol","turnstile":"native-finite-recipes","jsdOneshot":"experimental"}})
+        json!({"service":"cf-gateway-rust","version":crate::version::VERSION,"buildId":crate::version::build_id(),"mode":"pure-algorithm","precomputedEnvironmentProfile":false,"strictPureAlgorithmAcceptance":stats.strict,"uptimeSeconds":self.started.elapsed().as_secs(),"requests":stats.total,"active":stats.active,"success":stats.success,"failed":stats.failed,"runtime":{"language":"Rust","python":null,"rustEnabled":true,"rssBytes":rss,"sessions":sessions,"verifiedReadConcurrency":4,"responseCache":false,"defaultMode":"relay","networkMode":self.network.mode,"dnsMode":self.network.dns_mode(),"dohEnabled":self.network.doh,"dohUrl":if self.network.doh {Some(self.network.doh_url.as_str())}else{None}},"recent":stats.recent,"sessionDetails":session_details,"capabilities":{"nativeHttp":true,"managedChallenge":"native-rust-protocol","turnstile":"native-finite-recipes","jsdOneshot":"experimental"}})
     }
     pub fn history(&self) -> Value {
         let stats = self.stats.lock().unwrap();
@@ -161,6 +166,27 @@ impl Service {
         analyze: bool,
         export: bool,
         image: bool,
+    ) -> Result<(Value, Vec<u8>)> {
+        let (network, connect_to) = self.network.request(&options)?;
+        let dns = if network == self.network {
+            self.dns.clone()
+        } else {
+            Dns::new(&network)?
+        };
+        crate::network::with_context(
+            RequestContext::configured(connect_to.clone(), dns),
+            self.execute_inner(options, analyze, export, image, network, connect_to),
+        )
+        .await
+    }
+    async fn execute_inner(
+        &self,
+        options: Value,
+        analyze: bool,
+        export: bool,
+        image: bool,
+        network: NetworkConfig,
+        connect_to: ConnectTo,
     ) -> Result<(Value, Vec<u8>)> {
         let object = options
             .as_object()
@@ -191,26 +217,7 @@ impl Service {
         if !(1000.0..=120000.0).contains(&timeout) {
             return Err(bad("INVALID_TIMEOUT", "timeoutMs 范围为 1000～120000"));
         }
-        let proxy = object
-            .get("proxy")
-            .filter(|v| !v.is_null())
-            .map(|v| {
-                v.as_str()
-                    .ok_or_else(|| bad("INVALID_PROXY", "代理地址无效"))
-            })
-            .transpose()?
-            .map(String::from);
-        if let Some(proxy) = &proxy {
-            let proxy_url =
-                url::Url::parse(proxy).map_err(|_| bad("INVALID_PROXY", "代理地址无效"))?;
-            if !matches!(
-                proxy_url.scheme(),
-                "http" | "https" | "socks4" | "socks5" | "socks5h"
-            ) || proxy_url.host_str().is_none()
-            {
-                return Err(bad("INVALID_PROXY", "代理需要使用 HTTP/HTTPS/SOCKS"));
-            }
-        }
+        let proxy = network.proxy.clone();
         let session = self.session(url, name, proxy.clone())?;
         let start = Instant::now();
         let deadline = start + Duration::from_secs_f64(timeout / 1000.);
@@ -224,13 +231,19 @@ impl Service {
             "fetch"
         };
         let mut replay = json!({"url":url,"session":name,"timeoutMs":timeout});
-        if let Some(proxy) = &proxy {
-            let p = url::Url::parse(proxy).unwrap();
-            if p.username().is_empty() && p.password().is_none() {
-                replay["proxy"] = json!(proxy);
-            }
+        let credentials_omitted = proxy.as_ref().is_some_and(|p| {
+            url::Url::parse(p).is_ok_and(|p| !p.username().is_empty() || p.password().is_some())
+        });
+        let mut replay_network =
+            json!({"proxy":proxy,"doh":{"enabled":network.doh,"url":network.doh_url}});
+        if credentials_omitted {
+            replay_network.as_object_mut().unwrap().remove("proxy");
         }
-        let mut record = json!({"id":uuid::Uuid::new_v4().to_string(),"url":url,"host":parsed.host_str(),"path":parsed.path(),"time":epoch_ms()/1000,"operation":operation,"request":replay,"proxyCredentialsOmitted":proxy.as_ref().is_some_and(|p|url::Url::parse(p).is_ok_and(|p|!p.username().is_empty()||p.password().is_some()))});
+        if !connect_to.is_empty() {
+            replay_network["mapping"] = serde_json::to_value(&connect_to)?;
+        }
+        replay["network"] = replay_network;
+        let mut record = json!({"id":uuid::Uuid::new_v4().to_string(),"url":url,"host":parsed.host_str(),"path":parsed.path(),"time":epoch_ms()/1000,"operation":operation,"networkMode":network.mode,"dnsMode":network.dns_mode(),"dohEnabled":network.doh,"dohUrl":if network.doh {Some(network.doh_url.as_str())}else{None},"request":replay,"proxyCredentialsOmitted":credentials_omitted});
         {
             let mut stats = self.stats.lock().unwrap();
             stats.total += 1;
@@ -277,7 +290,6 @@ impl Service {
                             response,
                             details: challenge.summary(),
                             solved: false,
-                            fallback: false,
                         };
                         return Ok((outcome, queue_ms));
                     }
@@ -365,14 +377,7 @@ impl Service {
                 }
                 record["queueMs"] = json!(queue_ms);
                 record["bytes"] = json!(outcome.response.content.len());
-                record["route"] = json!(if proxy.is_some() {
-                    "proxy"
-                } else if session.used_mapping(&outcome.response.url) {
-                    "mapped"
-                } else {
-                    "direct"
-                });
-                record["routeFallback"] = json!(outcome.fallback);
+                record["route"] = json!(if proxy.is_some() { "proxy" } else { "direct" });
                 let image_kind = if image {
                     Some(image_type(&outcome.response).unwrap())
                 } else {
@@ -527,7 +532,7 @@ mod regression {
     }
     #[test]
     fn credentials_enforce_domain_path_secure_expiry_and_host_only_scope() {
-        let s = Session::new(Dns::new(false).unwrap(), None).unwrap();
+        let s = Session::new(Dns::new(&NetworkConfig::default()).unwrap(), None).unwrap();
         let url = "https://example.org/";
         for cookie in [
             "cf_clearance=domain; Domain=.example.org; Path=/; Secure; HttpOnly",

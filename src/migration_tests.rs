@@ -1002,9 +1002,6 @@ fn invoke(op: &str, a: &[Value], k: &Value) -> Result<Value> {
         }
         "cf_gateway.allocator_task.base31" => json!(models::base31(uint(&a[0])?)),
         "cf_gateway.allocator_task.policy_methods" => json!(7),
-        "cf_gateway.cdn_routes.cloudflare_answer" => {
-            json!(network::cloudflare_answer(&a[0], s(1)?))
-        }
         "cf_gateway.dispatcher.state_hash" => {
             json!(catalog::state_hash(s(0)?, uint(&a[1])? as u32))
         }
@@ -1225,8 +1222,20 @@ fn deterministic_python_contracts() {
     let mut failures = Vec::new();
     let mut passed = 0;
     let mut original = std::collections::HashSet::new();
+    let retired = cases()
+        .iter()
+        .filter(|row| row["operation"] == "cf_gateway.cdn_routes.cloudflare_answer")
+        .count();
+    assert_eq!(
+        retired, 12,
+        "Only the intentionally removed global CDN-mapping contracts are retired"
+    );
     for row in cases() {
         let op = row["operation"].as_str().unwrap();
+        if op == "cf_gateway.cdn_routes.cloudflare_answer" {
+            continue;
+        }
+
         let a = if op == "cf_gateway.compiled_data.decode" {
             row["args"].clone()
         } else {
@@ -1366,7 +1375,7 @@ fn deterministic_python_contracts() {
     }
     eprintln!(
         "{passed}/{} differential calls, {} original tests with passing contracts",
-        cases().len(),
+        cases().len() - retired,
         original.len()
     );
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));

@@ -21,6 +21,7 @@ const server=http.createServer((req,res)=>{
   const status=await (await fetch(base+'/v1/status',{headers})).json();
   assert.match(status.buildId,/^[a-f0-9]{12}$/);assert.ok(html.includes('v'+status.version+' · '+status.buildId));
   assert.equal(status.runtime.language,'Rust');assert.equal(status.runtime.python,null);assert.ok(status.runtime.rssBytes>0);
+  assert.equal(status.runtime.networkMode,process.env.CF_TEST_NETWORK_MODE||'direct');assert.match(html,/id="network-mode"/);assert.equal(status.runtime.dnsMode,process.env.CF_TEST_DNS_MODE||'system');
   if(token){for(const path of ['/v1/status','/v1/history?token='+token]){const denied=await fetch(base+path);await denied.arrayBuffer();assert.equal(denied.status,401);}}
   for(const site of ['twkan','69shuba','banxia']){
     const q=new URLSearchParams({site,base:'https://reader.example:8443/gateway',...(token?{token}:{})});
