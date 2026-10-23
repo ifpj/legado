@@ -29,6 +29,7 @@ fn independent_program_constants() {
     let mut raw = vec![0; v["prefixLength"].as_u64().unwrap() as usize];
     raw.extend(STANDARD.decode(v["tailBase64"].as_str().unwrap()).unwrap());
     let f = Format {
+        opcode_multiplier: None,
         byte_offset: 37,
         initial_key: 191,
         state_step: 244,

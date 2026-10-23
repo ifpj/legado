@@ -134,6 +134,24 @@ pub(crate) fn script_build(t: &Tables<'_>) -> Option<String> {
         None
     }
 }
+fn data_reference<'a>(t: &Tables<'a>, node: Node<'a>) -> Option<String> {
+    let node = unwrap(node);
+    if node.kind() == "identifier" {
+        return Some(t.text(node).to_string());
+    }
+    if node.kind() == "subscript_expression" {
+        let object = child(node, "object").ok()?;
+        if object.kind() != "identifier" {
+            return None;
+        }
+        let index = integer(t, child(node, "index").ok()?).ok()?;
+        if (0..65536).contains(&index) {
+            return Some(format!("{}[{index}]", t.text(object)));
+        }
+    }
+    None
+}
+
 pub(crate) fn transform_name(t: &Tables<'_>) -> Result<String> {
     let mut candidates = HashSet::new();
     for node in t
@@ -145,42 +163,47 @@ pub(crate) fn transform_name(t: &Tables<'_>) -> Result<String> {
     {
         let left = child(node, "left")?;
         let right = unwrap(child(node, "right")?);
-        if left.kind() != "identifier" || right.kind() != "call_expression" {
+        let Some(target_reference) = data_reference(t, left) else {
+            continue;
+        };
+        if right.kind() != "call_expression" {
             continue;
         }
         let target = t.text(left);
         let args = children(child(right, "arguments")?);
         let function = child(right, "function")?;
-        let helper =
-            if args.len() == 1 && function.kind() == "identifier" && t.text(args[0]) == target {
-                Some(t.text(function).to_string())
+        let helper = if args.len() == 1
+            && function.kind() == "identifier"
+            && data_reference(t, args[0]).as_ref() == Some(&target_reference)
+        {
+            Some(t.text(function).to_string())
+        } else {
+            let local = t.scope(right);
+            let globals = t.globals.borrow();
+            let identifiers = args
+                .iter()
+                .flat_map(|n| t.walk(*n, true))
+                .filter(|n| n.kind() == "identifier")
+                .map(|n| t.text(n))
+                .collect::<HashSet<_>>();
+            if !identifiers.contains(target) {
+                continue;
+            }
+            let unknown = identifiers
+                .into_iter()
+                .filter(|n| {
+                    !local.contains_key(*n)
+                        && !globals.contains_key(*n)
+                        && !matches!(*n, "undefined" | "Number" | "String" | "Math" | "Reflect")
+                        && *n != target
+                })
+                .collect::<HashSet<_>>();
+            if unknown.len() == 1 {
+                unknown.into_iter().next().map(String::from)
             } else {
-                let local = t.scope(right);
-                let globals = t.globals.borrow();
-                let identifiers = args
-                    .iter()
-                    .flat_map(|n| t.walk(*n, true))
-                    .filter(|n| n.kind() == "identifier")
-                    .map(|n| t.text(n))
-                    .collect::<HashSet<_>>();
-                if !identifiers.contains(target) {
-                    continue;
-                }
-                let unknown = identifiers
-                    .into_iter()
-                    .filter(|n| {
-                        !local.contains_key(*n)
-                            && !globals.contains_key(*n)
-                            && !matches!(*n, "undefined" | "Number" | "String" | "Math" | "Reflect")
-                            && *n != target
-                    })
-                    .collect::<HashSet<_>>();
-                if unknown.len() == 1 {
-                    unknown.into_iter().next().map(String::from)
-                } else {
-                    None
-                }
-            };
+                None
+            }
+        };
         let Some(helper) = helper.filter(|s| (4..=64).contains(&s.len())) else {
             continue;
         };
@@ -196,7 +219,7 @@ pub(crate) fn transform_name(t: &Tables<'_>) -> Result<String> {
             .into_iter()
             .filter(|n| n.kind() == "assignment_expression")
         {
-            if t.text(child(assignment, "left")?) != target {
+            if data_reference(t, child(assignment, "left")?).as_ref() != Some(&target_reference) {
                 continue;
             }
             let value = unwrap(child(assignment, "right")?);
@@ -219,13 +242,21 @@ pub(crate) fn transform_name(t: &Tables<'_>) -> Result<String> {
                         .and_then(|n| t.value(n).ok()?.text().ok())
                 });
             let (start, end) = (unwrap(args[0]), unwrap(args[1]));
-            if prop.as_deref() != Some("slice") || start.kind() != "identifier" {
+            let Some(start_reference) = data_reference(t, start) else {
+                continue;
+            };
+            if prop.as_deref() != Some("slice") {
                 continue;
             }
             if [0., 17., 255.].into_iter().all(|v| {
                 let mut env = t.scope(end);
-                env.insert(t.text(start).to_string(), Constant::Number(v));
-                t.eval(end, &mut env).and_then(|n| n.number()) == Ok(v + 16.)
+                let overrides = t
+                    .walk(end, true)
+                    .into_iter()
+                    .filter(|node| data_reference(t, *node).as_ref() == Some(&start_reference))
+                    .map(|node| (node.id(), Constant::Number(v)))
+                    .collect();
+                t.bound(end, &mut env, overrides).and_then(|n| n.number()) == Ok(v + 16.)
             }) {
                 candidates.insert(helper.clone());
             }
@@ -306,22 +337,44 @@ fn polynomial<'a>(t: &Tables<'a>, value: Node<'a>, name: &str) -> Result<(u8, u3
 }
 pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
     let mut reasons = Vec::new();
-    for function in t.all().iter().copied().into_iter().filter(|n| {
-        n.kind() == "function_declaration"
-            && t.text(*n).contains("2654435769")
-            && t.text(*n).contains("return[]")
-            && t.text(*n).len() < 7000
-    }) {
+    let candidates = t
+        .all()
+        .iter()
+        .copied()
+        .into_iter()
+        .filter(|n| {
+            n.kind() == "function_declaration"
+            && (t.text(*n).contains("2654435769") || t.text(*n).contains("return[]"))
+            // Cloudflare occasionally ships a larger obfuscated dispatcher
+            // around the same finite recipe.  Current scripts also moved the
+            // unrelated `return[]` marker outside the format reader, so the
+            // arithmetic constant is the stable prefilter.  Keep a bound to
+            // avoid scanning an unbounded bootstrap.
+            && t.text(*n).len() < 1_048_576
+        })
+        .collect::<Vec<_>>();
+    let candidate_info = candidates
+        .iter()
+        .map(|function| {
+            json!({
+                "name": child(*function, "name").map(|name| t.text(name)).unwrap_or(""),
+                "bytes": t.text(*function).len(),
+                "hasEmptyReturn": t.text(*function).contains("return[]"),
+            })
+        })
+        .collect::<Vec<_>>();
+    for function in candidates {
         let attempt = (|| -> Result<Format> {
             let params = children(child(function, "parameters")?);
             require(!params.is_empty(), "Reader parameter")?;
             let param = t.text(params[0]);
             let mut reader = None;
-            for arrow in t
-                .walk(function, true)
-                .into_iter()
-                .filter(|n| n.kind() == "arrow_function")
-            {
+            for arrow in t.walk(function, true).into_iter().filter(|n| {
+                matches!(
+                    n.kind(),
+                    "arrow_function" | "function_expression" | "function_declaration"
+                )
+            }) {
                 for expr in t.walk(child(arrow, "body")?, false) {
                     let Some(pair) = operation(t, expr, "-") else {
                         continue;
@@ -352,14 +405,19 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
                             .map(unwrap)
                             .find(|n| n.kind() == "identifier")
                         {
-                            if let Some(parent) =
-                                arrow.parent().filter(|p| p.kind() == "variable_declarator")
-                            {
-                                reader = Some((
-                                    t.text(child(parent, "name")?).to_string(),
-                                    t.text(state).to_string(),
-                                    offset,
-                                ));
+                            let reader_name = arrow
+                                .parent()
+                                .filter(|p| p.kind() == "variable_declarator")
+                                .and_then(|parent| child(parent, "name").ok())
+                                .map(|name| t.text(name).to_string())
+                                .or_else(|| {
+                                    (arrow.kind() == "function_declaration")
+                                        .then(|| child(arrow, "name").ok())
+                                        .flatten()
+                                        .map(|name| t.text(name).to_string())
+                                });
+                            if let Some(reader_name) = reader_name {
+                                reader = Some((reader_name, t.text(state).to_string(), offset));
                                 break;
                             }
                         }
@@ -418,10 +476,24 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
                 ),
             )?;
             let mut salts = HashSet::new();
+            let changed_names: HashSet<_> = t
+                .walk(function, true)
+                .into_iter()
+                .filter_map(|node| {
+                    let name = match node.kind() {
+                        "update_expression" => node.child_by_field_name("argument"),
+                        "augmented_assignment_expression" => node.child_by_field_name("left"),
+                        _ => None,
+                    }?;
+                    (name.kind() == "identifier").then(|| t.text(name))
+                })
+                .collect();
             for node in t.walk(function, true) {
                 if let Some(pair) = operation(t, node, "^") {
                     for [a, b] in [pair, [pair[1], pair[0]]] {
-                        if unwrap(b).kind() == "identifier" {
+                        if unwrap(b).kind() == "identifier"
+                            && (integer(t, b).is_err() || changed_names.contains(t.text(unwrap(b))))
+                        {
                             if let Ok(v) = integer(t, a) {
                                 if (65536..(1i64 << 32)).contains(&v) && v != 2654435769 {
                                     salts.insert(v);
@@ -437,12 +509,13 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
             )?;
             let mut xors = HashSet::new();
             let mut after = false;
-            for arrow in t
-                .walk(function, true)
-                .into_iter()
-                .filter(|n| n.kind() == "arrow_function" && t.text(*n).contains("2654435769"))
-            {
-                for expr in t.walk(arrow, true) {
+            for arrow in t.walk(function, true).into_iter().filter(|n| {
+                matches!(
+                    n.kind(),
+                    "arrow_function" | "function_expression" | "function_declaration"
+                )
+            }) {
+                for expr in t.walk(child(arrow, "body")?, false) {
                     if let Some(pair) = operation(t, expr, "^") {
                         for [a, b] in [pair, [pair[1], pair[0]]] {
                             if t.walk(a, true)
@@ -450,7 +523,12 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
                                 .any(|n| n.kind() == "identifier" && t.text(*n) == reader)
                             {
                                 if let Ok(v) = integer(t, b) {
-                                    if (0..=255).contains(&v) {
+                                    if (0..=255).contains(&v)
+                                        && !t
+                                            .walk(b, true)
+                                            .into_iter()
+                                            .any(|node| operation(t, node, ">>>").is_some())
+                                    {
                                         xors.insert(v);
                                     }
                                 }
@@ -468,7 +546,10 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
                     }
                 }
             }
-            require(xors.len() == 1, "Character XOR ambiguity")?;
+            require(
+                xors.len() == 1,
+                &format!("Character XOR ambiguity: {xors:?}"),
+            )?;
             let (step, mult, increment, q) = transition.unwrap();
             Ok(Format {
                 byte_offset: offset as u8,
@@ -485,6 +566,7 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
                     "before-subtract"
                 }
                 .into(),
+                opcode_multiplier: None,
             })
         })();
         match attempt {
@@ -493,10 +575,94 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
         }
     }
     Err(Error {
-        details: json!({"candidateErrors":reasons}),
+        details: json!({"candidateErrors":reasons,"candidates":candidate_info}),
         ..Error::new("MANAGED_FORMAT_UNSUPPORTED", "未能静态恢复当前数据格式")
     })
 }
+fn opcode_encoding(t: &Tables<'_>, format: &Format) -> Result<Option<u32>> {
+    let mut models = HashSet::new();
+    let mut attempts = Vec::new();
+    for function in t.all().iter().copied().filter(|node| {
+        node.kind() == "function_declaration" && node.end_byte() - node.start_byte() < 3000
+    }) {
+        let params = children(child(function, "parameters")?);
+        if params.len() != 3 || !params.iter().all(|n| n.kind() == "identifier") {
+            continue;
+        }
+        let nodes = t.walk(child(function, "body")?, false);
+        let input = t.text(params[0]);
+        let key = t.text(params[1]);
+        let has_xor = nodes.iter().any(|n| {
+            n.kind() == "augmented_assignment_expression"
+                && child(*n, "left").is_ok_and(|n| t.text(n) == input)
+                && child(*n, "operator").is_ok_and(|n| t.text(n) == "^=")
+        });
+        let has_mask = nodes.iter().any(|n| {
+            n.kind() == "augmented_assignment_expression"
+                && child(*n, "left").is_ok_and(|n| t.text(n) == key)
+                && child(*n, "operator").is_ok_and(|n| t.text(n) == "&=")
+                && child(*n, "right").is_ok_and(|n| integer(t, n) == Ok(7))
+        });
+        if !has_xor || !has_mask || !t.text(function).contains(">>>") {
+            continue;
+        }
+        let multipliers: HashSet<_> = nodes
+            .iter()
+            .filter_map(|n| operation(t, *n, "*"))
+            .flat_map(|pair| [pair, [pair[1], pair[0]]])
+            .filter(|pair| t.text(unwrap(pair[0])) == key)
+            .filter_map(|pair| integer(t, pair[1]).ok())
+            .filter(|v| (0..=u32::MAX as i64).contains(v))
+            .collect();
+        if multipliers.len() != 1 {
+            attempts.push("Opcode multiplier ambiguity".to_string());
+            continue;
+        }
+        let multiplier = *multipliers.iter().next().unwrap() as u32;
+        let mut candidate = format.clone();
+        candidate.opcode_multiplier = Some(multiplier);
+        let mut valid = true;
+        'samples: for position in [0, 1, 17, 2354, 65535] {
+            for key in [0, 1, 9, 127, 255] {
+                for value in [0, 1, 63, 128, 255] {
+                    let expected = candidate.opcode(
+                        (value as u8 ^ key as u8).wrapping_add(candidate.byte_offset),
+                        key as u8,
+                        position,
+                    );
+                    let actual = t
+                        .invoke_bound(
+                            function,
+                            vec![
+                                Constant::Number(value as f64),
+                                Constant::Number(key as f64),
+                                Constant::Number(position as f64),
+                            ],
+                            std::collections::HashMap::new(),
+                        )
+                        .and_then(|v| v.integer());
+                    if actual != Ok(expected as i64) {
+                        attempts.push(format!("Opcode finite model: {actual:?}"));
+                        valid = false;
+                        break 'samples;
+                    }
+                }
+            }
+        }
+        if valid {
+            models.insert(multiplier);
+        }
+    }
+    if models.is_empty() && attempts.is_empty() {
+        return Ok(None);
+    }
+    require(
+        models.len() == 1,
+        &format!("Opcode transform unsupported: {attempts:?}"),
+    )?;
+    Ok(models.into_iter().next())
+}
+
 pub(crate) fn key_material(t: &Tables<'_>, encoded: &str, f: &Format) -> Result<Value> {
     // Every helper candidate is a current source identifier, and must have
     // a verified adjacent 16-byte literal under the rolling instruction key.
@@ -509,6 +675,8 @@ pub(crate) fn recover_material(encoded: &str, f: &Format, names: &HashSet<&str>)
     let p = program(&raw, f, false)?;
     let short = |position, key, len| short_literal(&raw, position, key, f, len);
     let mut found = Vec::new();
+    let mut helper_matches = 0;
+    let mut mask_matches = 0;
     let mut lengths = names
         .iter()
         .map(|name| name.len())
@@ -516,7 +684,7 @@ pub(crate) fn recover_material(encoded: &str, f: &Format, names: &HashSet<&str>)
         .collect::<Vec<_>>();
     lengths.sort_unstable();
     lengths.dedup();
-    for position in 3..p.code_length.saturating_sub(90) {
+    for position in 3..p.code_length.saturating_sub(20) {
         for &len in &lengths {
             let key = f.byte(raw[position], len as u8);
             let Some(name) = short(position, key, len).and_then(|n| String::from_utf8(n).ok())
@@ -526,8 +694,12 @@ pub(crate) fn recover_material(encoded: &str, f: &Format, names: &HashSet<&str>)
             if !names.contains(name.as_str()) {
                 continue;
             }
+            helper_matches += 1;
             let next = position + len + 1;
-            let opcode = f.byte(raw[next], key);
+            if next + 20 > p.code_length {
+                continue;
+            }
+            let opcode = f.opcode(raw[next], key, next);
             let next_key = f.key(key, opcode);
             let Some(mask) = short(next + 3, next_key, 16) else {
                 continue;
@@ -535,6 +707,7 @@ pub(crate) fn recover_material(encoded: &str, f: &Format, names: &HashSet<&str>)
             if !mask.iter().all(|c| (33..=126).contains(c)) {
                 continue;
             }
+            mask_matches += 1;
             for slot in 1..=2 {
                 let tag = f.byte(raw[position - 3 + slot], key);
                 if tag == f.byte(raw[next + slot], next_key) {
@@ -543,10 +716,20 @@ pub(crate) fn recover_material(encoded: &str, f: &Format, names: &HashSet<&str>)
             }
         }
     }
-    require(found.len() == 1, "Adjacent key mask missing or ambiguous")?;
+    if found.len() != 1 {
+        return Err(Error {
+            details: json!({"helpers":names,"helperMatches":helper_matches,"maskMatches":mask_matches,"matches":found.len(),"codeLength":p.code_length,"format":f}),
+            ..Error::new(
+                "UNSUPPORTED_FORMAT",
+                "Adjacent key mask missing or ambiguous",
+            )
+        });
+    }
     Ok(found.remove(0))
 }
 pub fn compile(source: &str, frame: bool) -> Result<Plan> {
+    let prepared = crate::literal_strings::prepare(source)?;
+    let source = prepared.as_ref();
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_javascript::LANGUAGE.into())
@@ -560,7 +743,8 @@ pub fn compile(source: &str, frame: bool) -> Result<Plan> {
     )?;
     let tables = Tables::new(tree.root_node(), source)?;
     let values = tables.strings();
-    let f = format(&tables)?;
+    let mut f = format(&tables)?;
+    f.opcode_multiplier = opcode_encoding(&tables, &f)?;
     let one = |pattern: &str| -> Result<String> {
         let found: HashSet<_> = values
             .iter()
@@ -575,24 +759,37 @@ pub fn compile(source: &str, frame: bool) -> Result<Plan> {
     let flow = one(r"^/fo/[0-9]+:[0-9]+:[A-Za-z0-9_-]+/$")?;
     let mut material = Vec::new();
     let mut programs = Vec::new();
+    let mut material_errors = Vec::new();
     for value in &values {
         if value.len() > 64 && re(r"^[A-Za-z0-9+/]+={0,2}$").is_match(value) {
             if let Ok(raw) = STANDARD.decode(value) {
                 if let Ok(p) = program(&raw, &f, false) {
-                    if let Ok(k) = key_material(&tables, value, &f) {
-                        if !material
-                            .iter()
-                            .any(|m: &Value| m["program_sha256"] == k["program_sha256"])
-                        {
-                            material.push(k);
-                            programs.push(json!(p));
+                    match key_material(&tables, value, &f) {
+                        Ok(k) => {
+                            if !material
+                                .iter()
+                                .any(|m: &Value| m["program_sha256"] == k["program_sha256"])
+                            {
+                                material.push(k);
+                                programs.push(json!(p));
+                            }
+                        }
+                        Err(error) => {
+                            if material_errors.len() < 16 {
+                                material_errors.push(error.reply());
+                            }
                         }
                     }
                 }
             }
         }
     }
-    require(material.len() == 1, "Initializer key source ambiguous")?;
+    if material.len() != 1 {
+        return Err(Error {
+            details: json!({"candidates":material.len(),"errors":material_errors}),
+            ..Error::new("UNSUPPORTED_FORMAT", "Initializer key source ambiguous")
+        });
+    }
     let build = script_build(&tables)
         .ok_or_else(|| Error::new("UNSUPPORTED_FORMAT", "Protocol build missing"))?;
     let mut meta = json!({"format":serde_json::to_value(&f)?,"key_material":material.remove(0),"programs":programs,"build":build,"bootstrap":null,"dispatcher_profile":null,"property_profile":null,"immediate_profile":null,"input_data_profile":null,"integer_input_tag":null,"declared_properties":null});
@@ -709,4 +906,78 @@ pub(crate) fn declarations(t: &Tables<'_>) -> Result<Value> {
         }
     }
     Ok(json!(declarations))
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    #[test]
+    fn position_key_opcode_model_is_verified_and_inverts_all_candidates() {
+        let source="function hash(position){position^=1612195754;position=(position^(position>>>16))*40503|0;position=(position^(position>>>13))*13849|0;return position^(position>>>16)}function decode(value,key,position){value^=(hash(position)^key*403)&255;key&=7;return (value>>>key|value<<8-key)&255}";
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_javascript::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let tables = Tables::new(tree.root_node(), source).unwrap();
+        let mut f: Format=serde_json::from_value(json!({"byte_offset":37,"initial_key":191,"state_step":244,"state_multiplier":48294,"state_increment":31651,"hash_salt":1612195754u32,"char_xor":133,"state_quadratic":0,"char_mode":"before-subtract"})).unwrap();
+        assert_eq!(opcode_encoding(&tables, &f).unwrap(), Some(403));
+        f.opcode_multiplier = Some(403);
+        for opcode in [0, 1, 64, 127, 244, 255] {
+            let keys = f.instruction_keys(opcode);
+            for position in [0, 1, 2354] {
+                for key in 0..=255u8 {
+                    let raw = (opcode.rotate_left((key & 7) as u32)
+                        ^ (f.seed(position) ^ key as u32 * 403) as u8
+                        ^ key)
+                        .wrapping_add(f.byte_offset);
+                    assert_eq!(f.opcode(raw, key, position), opcode);
+                    assert!(keys
+                        .at(&f, raw, position)
+                        .contains(&(key, f.key(key, opcode))));
+                }
+            }
+        }
+        let changed = source.replace("8-key", "7-key");
+        let tree = parser.parse(&changed, None).unwrap();
+        let tables = Tables::new(tree.root_node(), &changed).unwrap();
+        assert!(opcode_encoding(&tables, &f).is_err());
+    }
+
+    #[test]
+    fn format_does_not_require_a_literal_hash_increment_or_arrow_reader() {
+        for (reader, character) in [
+            (
+                "let next=()=>{return ((bytes[position++]-37)&255)^state};",
+                "let character=()=>{return ((next()^133^(seed>>>16&255))-seed)&255};",
+            ),
+            (
+                "function next(){return ((bytes[position++]-37)&255)^state}",
+                "function character(){return ((next()^133^(seed>>>16&255))-seed)&255}",
+            ),
+            (
+                "let next=function(){return ((bytes[position++]-37)&255)^state};",
+                "let character=function(){return ((next()^133^(seed>>>16&255))-seed)&255};",
+            ),
+        ] {
+            let source=format!("function constants(bytes,position){{let state=191;for(let entry=0;entry<1;entry++){{state=((state+244)*48294+31651)&255;{reader}let seed=position^1612195754;{character}}}return[]}}");
+            let mut parser = Parser::new();
+            parser
+                .set_language(&tree_sitter_javascript::LANGUAGE.into())
+                .unwrap();
+            let tree = parser.parse(&source, None).unwrap();
+            let tables = Tables::new(tree.root_node(), &source).unwrap();
+            let recovered =
+                format(&tables).unwrap_or_else(|error| panic!("{reader} {character}: {error:?}"));
+            assert_eq!(recovered.byte_offset, 37);
+            assert_eq!(recovered.initial_key, 191);
+            assert_eq!(recovered.state_step, 244);
+            assert_eq!(recovered.state_multiplier, 48294);
+            assert_eq!(recovered.state_increment, 31651);
+            assert_eq!(recovered.hash_salt, 1612195754);
+            assert_eq!(recovered.char_xor, 133);
+            assert_eq!(recovered.char_mode, "before-subtract");
+        }
+    }
 }

@@ -44,6 +44,29 @@ pub fn checked_spans(
     opcode: u8,
     salt: u32,
 ) -> Result<Vec<(usize, usize)>> {
+    if format.opcode_multiplier.is_some() {
+        require(raw.len() <= 1024 * 1024, "Checked span bounds")?;
+        let keys = format.instruction_keys(opcode);
+        let mut output = Vec::new();
+        let mut budget = 64 * 1024 * 1024usize;
+        for at in 0..raw.len().saturating_sub(7) {
+            for &(_, key) in keys.at(format, raw[at], at) {
+                let size = (format.byte(raw[at + 1], key) as usize) << 16
+                    | (format.byte(raw[at + 2], key) as usize) << 8
+                    | format.byte(raw[at + 3], key) as usize;
+                if !(4..=65536).contains(&size) || at + 8 + size > raw.len() {
+                    continue;
+                }
+                require(size <= budget, "Checked span operation budget")?;
+                budget -= size;
+                if let Some(end) = crate::data::framed_end(raw, at, key, opcode, format, salt) {
+                    require(output.len() < 8192, "Checked span capacity")?;
+                    output.push((at, end));
+                }
+            }
+        }
+        return Ok(output);
+    }
     let keys = format.keys(opcode);
     let mut output = vec![0u32; 16384];
     let count = unsafe {

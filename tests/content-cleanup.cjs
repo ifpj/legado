@@ -33,6 +33,10 @@ for(const [line,catalog,heading,book] of cases){
 assert.equal(ctx.cfCleanChapterText('第1章 绯红\n第1章 绯红\n'+body,'1.第1章 绯红','',''),body);
 assert.equal(ctx.cfCleanChapterText('异香妙用！\n\n'+body,'第186章 异香妙用！','第186章 异香妙用！',''),body,'remove unnumbered repeated heading with punctuation');
 const openingSpeech='什么破任务！！！\n\n陆绣看着前方魔力乱飙的两人，忍不住骂了一句。\n\n还下午茶！';
+const openingSubject='哥布林，\n\n蟑螂般臭名昭著的它们，几乎分布在每一个奇幻位面当中。';
+assert.equal(ctx.cfCleanChapterText(openingSubject,'第3章 哥布林','',''),openingSubject,'keep an opening subject with continuation punctuation');
+assert.equal(ctx.cfCleanChapterText('万事俱备，冲锋号吹起（求月票）\n\n'+body,'第139章 万事俱备，冲锋号吹起（求月票）','',''),body,'normalize title notes with or without chapter number');
+assert.equal(ctx.cfCleanChapterText('【银脉长弓】\n\n种类：弓\n\n效果：射击','第522章 【银脉长弓】','',''),'【银脉长弓】\n\n种类：弓\n\n效果：射击','keep a same-name item heading when it starts an attribute panel');
 assert.equal(ctx.cfCleanChapterText('第260章 什么破任务\n\n'+openingSpeech,'第260章 什么破任务','',''),openingSpeech,'keep opening exclamation when the following paragraph attributes speech');
 const internal=body+'\n\n他提到“第1章 绯红”，又翻过一页。\n\n第1章 绯红\n\n这行是角色正在读的书中内容。';
 assert.equal(ctx.cfCleanChapterText(internal,'第1章 绯红','',''),internal,'do not globally erase title references');
@@ -41,6 +45,12 @@ assert.equal(ctx.cfCleanChapterText('第1章 绯红','第1章 绯红','',''),'�
 assert.equal(ctx.cfCleanChapterText(body+'\n\n(本章完)','第1章','',''),body);
 assert.equal(ctx.cfCleanChapterText(body+'\n\n\u2003(本章完)','第1章','',''),body);
 assert.equal(ctx.cfCleanChapterText(body+'(本章完)','第1章','',''),body);
+assert.equal(ctx.cfCleanChapterText(body+'第11章绝对禁止这些行为！','第11章 绝对禁止这些行为！','',''),body,'remove an exact numbered heading glued after the final sentence');
+assert.equal(ctx.cfCleanChapterText(body+'第１２章归来','第12章 归来','',''),body,'normalize fullwidth characters in a trailing heading');
+for(const ending of ['他念道：“第11章绝对禁止这些行为！”','第12章绝对禁止这些行为！','第11章绝对禁止这些行为！他喊道。','他最后写下：第11章绝对禁止这些行为！','他说：“这是正文。第11章绝对禁止这些行为！']){
+ const text=body+ending;
+ assert.equal(ctx.cfCleanChapterText(text,'第11章 绝对禁止这些行为！','',''),text,'preserve quoted, contextual or nonmatching trailing title mentions');
+}
 assert.equal(ctx.cfCleanChapterText('甲\b乙\t丙\n丁\r\n戊','','',''),'甲乙\t丙\n丁\r\n戊','remove controls without deleting words');
 assert.equal(ctx.cfCleanChapterText('半夏小说\n\n'+body,'','半夏小说',''),'半夏小说\n\n'+body,'ignore site h1 as chapter metadata');
 assert.equal(ctx.cfCleanChapterText('7.5K\n\n'+body,'第1章','',''),'7.5K\n\n'+body,'retain word-count notes');

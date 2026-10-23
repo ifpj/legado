@@ -20,6 +20,8 @@ pub struct Format {
     pub char_xor: u8,
     pub state_quadratic: u32,
     pub char_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opcode_multiplier: Option<u32>,
 }
 impl Format {
     pub fn key(&self, key: u8, opcode: u8) -> u8 {
@@ -32,6 +34,29 @@ impl Format {
     }
     pub fn byte(&self, raw: u8, key: u8) -> u8 {
         raw.wrapping_sub(self.byte_offset) ^ key
+    }
+    pub fn opcode(&self, raw: u8, key: u8, position: usize) -> u8 {
+        let value = self.byte(raw, key);
+        if let Some(multiplier) = self.opcode_multiplier {
+            (value ^ (self.seed(position) ^ (key as u32).wrapping_mul(multiplier)) as u8)
+                .rotate_right((key & 7) as u32)
+        } else {
+            value
+        }
+    }
+    pub fn instruction_keys(&self, opcode: u8) -> InstructionKeys {
+        let mut buckets: [Vec<(u8, u8)>; 256] = std::array::from_fn(|_| Vec::new());
+        for key in 0..=255u8 {
+            let raw = if let Some(multiplier) = self.opcode_multiplier {
+                opcode.rotate_left((key & 7) as u32)
+                    ^ key
+                    ^ (key as u32).wrapping_mul(multiplier) as u8
+            } else {
+                opcode ^ key
+            };
+            buckets[raw as usize].push((key, self.key(key, opcode)));
+        }
+        InstructionKeys { buckets }
     }
     pub fn char(&self, value: u8, seed: u32) -> u8 {
         let high = (seed >> 16) as u8;
@@ -51,6 +76,20 @@ impl Format {
     }
     pub fn keys(&self, opcode: u8) -> [u8; 256] {
         std::array::from_fn(|i| self.key(self.byte(i as u8, opcode), opcode))
+    }
+}
+pub struct InstructionKeys {
+    buckets: [Vec<(u8, u8)>; 256],
+}
+impl InstructionKeys {
+    pub fn at(&self, format: &Format, raw: u8, position: usize) -> &[(u8, u8)] {
+        let index = raw.wrapping_sub(format.byte_offset)
+            ^ if format.opcode_multiplier.is_some() {
+                format.seed(position) as u8
+            } else {
+                0
+            };
+        &self.buckets[index as usize]
     }
 }
 pub fn normalize(v: &Value) -> Result<Value> {
@@ -123,6 +162,8 @@ pub struct Plan {
 }
 impl Plan {
     pub fn analyze(source: &str, frame: bool) -> Result<Self> {
+        let prepared = crate::literal_strings::prepare(source)?;
+        let source = prepared.as_ref();
         static LAYOUTS: OnceLock<std::sync::Mutex<Vec<(bool, Value)>>> = OnceLock::new();
         let layouts = LAYOUTS.get_or_init(|| {
             let data: Value =
@@ -319,12 +360,24 @@ pub fn program(raw: &[u8], f: &Format, unframed: bool) -> Result<Program> {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Literal {
+    #[serde(skip)]
+    pub key: Option<u8>,
     pub start: usize,
     pub end: usize,
     pub value: String,
     pub packed: Option<String>,
     pub continuation: usize,
     pub pool_offset: usize,
+}
+impl Literal {
+    pub fn instruction_key(&self, raw: &[u8], format: &Format) -> u8 {
+        self.key.unwrap_or_else(|| {
+            format.key(
+                format.byte(raw[self.start], format.state_step),
+                format.state_step,
+            )
+        })
+    }
 }
 pub(crate) fn fragment(value: &str) -> Option<(String, usize, usize)> {
     let chars: Vec<_> = value.chars().map(|c| c as u32).collect();
@@ -383,91 +436,100 @@ pub(crate) fn literals_bounded(
             && max_units <= 65535,
         "Literal scan bounds",
     )?;
-    let keys = f.keys(f.state_step);
+    let keys = f.instruction_keys(f.state_step);
     let (mut result, mut occupied, mut occupied_frame, mut work) =
         (Vec::<Literal>::new(), 0, false, 0usize);
     for start in 0..p.code_length.saturating_sub(4) {
-        let key = keys[raw[start] as usize];
-        if f.byte(raw[start + slot], key) != tag {
-            continue;
-        }
-        let overlap = !overlaps && start < occupied;
-        if overlap && occupied_frame {
-            continue;
-        }
-        let candidate = (|| -> Result<Literal> {
-            let mut pos = start + 3;
-            if f.byte(raw[pos], key) == 127 {
-                require(!overlap, "Overlapping pool index")?;
-                pos += 1;
-                require(pos < p.code_length, "Pool index bounds")?;
-                let index = f.byte(raw[pos], key) ^ f.char_xor;
-                pos += 1;
-                return Ok(Literal {
+        let mut candidates = Vec::new();
+        for &(_, key) in keys.at(f, raw[start], start) {
+            if f.byte(raw[start + slot], key) != tag {
+                continue;
+            }
+            let overlap = !overlaps && start < occupied;
+            if overlap && occupied_frame {
+                continue;
+            }
+            let candidate = (|| -> Result<Literal> {
+                let mut pos = start + 3;
+                if f.byte(raw[pos], key) == 127 {
+                    require(!overlap, "Overlapping pool index")?;
+                    pos += 1;
+                    require(pos < p.code_length, "Pool index bounds")?;
+                    let index = f.byte(raw[pos], key) ^ f.char_xor;
+                    pos += 1;
+                    return Ok(Literal {
+                        key: Some(key),
+                        start,
+                        end: pos,
+                        value: p
+                            .strings
+                            .get(index as usize)
+                            .ok_or_else(|| Error::new("INVALID_DATA", "Pool index"))?
+                            .clone(),
+                        packed: None,
+                        continuation: 0,
+                        pool_offset: 0,
+                    });
+                }
+                let desc = descriptor(raw, &mut pos, f, key)?;
+                let size = (desc & 65535) as usize;
+                let wide = desc & 65536 != 0;
+                require(
+                    desc <= 131071
+                        && size <= max_units
+                        && pos + size * (if wide { 2 } else { 1 }) <= p.code_length,
+                    "Literal bounds",
+                )?;
+                if overlap {
+                    require(size >= 2, "Overlap prefix")?;
+                    let mut pp = pos;
+                    let prefix = text(raw, &mut pp, 2, wide, f, key)?;
+                    let prefix: Vec<_> = prefix.chars().map(|c| c as usize).collect();
+                    require(
+                        prefix.len() == 2
+                            && prefix[0] <= 255
+                            && prefix[1] <= 255
+                            && (prefix[0] * 256 + prefix[1] == 65535
+                                || prefix[0] * 256 + prefix[1] <= size - 2),
+                        "Overlap frame length",
+                    )?
+                }
+                work += size * (if wide { 2 } else { 1 });
+                require(work <= max_work, "Literal operation budget")?;
+                let value = text(raw, &mut pos, size, wide, f, key)?;
+                let frag = fragment(&value);
+                require(!overlap || frag.is_some(), "Unframed overlap")?;
+                require(
+                    binary
+                        || frag.is_some()
+                        || value.chars().all(|c| {
+                            c == '\n' || c == '\r' || c == '\t' || (' '..='~').contains(&c)
+                        })
+                        || (value.chars().count() <= 256
+                            && (value.starts_with("\u{1f600}a")
+                                || value.starts_with("\u{1f1fa}\u{1f1f8}"))),
+                    "Nontext candidate",
+                )?;
+                Ok(Literal {
+                    key: Some(key),
                     start,
                     end: pos,
-                    value: p
-                        .strings
-                        .get(index as usize)
-                        .ok_or_else(|| Error::new("INVALID_DATA", "Pool index"))?
-                        .clone(),
-                    packed: None,
-                    continuation: 0,
-                    pool_offset: 0,
-                });
+                    value,
+                    packed: frag.as_ref().map(|x| x.0.clone()),
+                    continuation: frag.as_ref().map_or(0, |x| x.1),
+                    pool_offset: frag.as_ref().map_or(0, |x| x.2),
+                })
+            })();
+            if work > max_work {
+                return Err(Error::new("INVALID_DATA", "Literal operation budget"));
             }
-            let desc = descriptor(raw, &mut pos, f, key)?;
-            let size = (desc & 65535) as usize;
-            let wide = desc & 65536 != 0;
-            require(
-                desc <= 131071
-                    && size <= max_units
-                    && pos + size * (if wide { 2 } else { 1 }) <= p.code_length,
-                "Literal bounds",
-            )?;
-            if overlap {
-                require(size >= 2, "Overlap prefix")?;
-                let mut pp = pos;
-                let prefix = text(raw, &mut pp, 2, wide, f, key)?;
-                let prefix: Vec<_> = prefix.chars().map(|c| c as usize).collect();
-                require(
-                    prefix.len() == 2
-                        && prefix[0] <= 255
-                        && prefix[1] <= 255
-                        && (prefix[0] * 256 + prefix[1] == 65535
-                            || prefix[0] * 256 + prefix[1] <= size - 2),
-                    "Overlap frame length",
-                )?
+            if let Ok(literal) = candidate {
+                candidates.push(literal);
             }
-            work += size * (if wide { 2 } else { 1 });
-            require(work <= max_work, "Literal operation budget")?;
-            let value = text(raw, &mut pos, size, wide, f, key)?;
-            let frag = fragment(&value);
-            require(!overlap || frag.is_some(), "Unframed overlap")?;
-            require(
-                binary
-                    || frag.is_some()
-                    || value
-                        .chars()
-                        .all(|c| c == '\n' || c == '\r' || c == '\t' || (' '..='~').contains(&c))
-                    || (value.chars().count() <= 256
-                        && (value.starts_with("\u{1f600}a")
-                            || value.starts_with("\u{1f1fa}\u{1f1f8}"))),
-                "Nontext candidate",
-            )?;
-            Ok(Literal {
-                start,
-                end: pos,
-                value,
-                packed: frag.as_ref().map(|x| x.0.clone()),
-                continuation: frag.as_ref().map_or(0, |x| x.1),
-                pool_offset: frag.as_ref().map_or(0, |x| x.2),
-            })
-        })();
-        if work > max_work {
-            return Err(Error::new("INVALID_DATA", "Literal operation budget"));
         }
-        if let Ok(literal) = candidate {
+        if candidates.len() == 1 {
+            let literal = candidates.pop().unwrap();
+            let overlap = !overlaps && start < occupied;
             if overlap {
                 result.pop();
             }
@@ -687,7 +749,7 @@ pub(crate) fn conflicting_literals(
         if !(anchor.start < anchor.end && anchor.end < raw.len()) {
             continue;
         }
-        let mut key = f.key(f.byte(raw[anchor.start], f.state_step), f.state_step);
+        let mut key = anchor.instruction_key(raw, f);
         let mut position = anchor.end;
         let mut spans = Vec::new();
         for _ in 0..24 {
@@ -699,7 +761,7 @@ pub(crate) fn conflicting_literals(
                 break;
             }
             let at = position;
-            let opcode = f.byte(raw[position], key);
+            let opcode = f.opcode(raw[position], key, position);
             key = f.key(key, opcode);
             if opcode == f.state_step {
                 if !by_offset.contains_key(&position)

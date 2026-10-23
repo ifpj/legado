@@ -14,6 +14,7 @@ pub mod html;
 pub mod http_tasks;
 pub mod identity;
 pub mod jsd;
+pub mod literal_strings;
 pub mod locale;
 pub mod math;
 pub mod model_geometry;

@@ -116,6 +116,7 @@ fn direct_completion_cannot_schedule_unrequested_work_or_accept_unknown_data() {
             .into_iter()
             .enumerate()
             .map(|(i, value)| data::Literal {
+                key: None,
                 start: i,
                 end: i + 1,
                 value,

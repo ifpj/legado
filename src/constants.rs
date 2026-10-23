@@ -123,6 +123,8 @@ pub struct Tables<'a> {
     overrides: RefCell<HashMap<usize, Constant<'a>>>,
     nodes: Vec<Node<'a>>,
     positions: HashMap<usize, usize>,
+    decoder_node: Option<usize>,
+    recovered_bindings: HashMap<usize, Constant<'a>>,
 }
 impl<'a> Tables<'a> {
     pub fn text(&self, n: Node<'_>) -> &str {
@@ -147,6 +149,8 @@ impl<'a> Tables<'a> {
             overrides: RefCell::new(HashMap::new()),
             nodes,
             positions,
+            decoder_node: None,
+            recovered_bindings: HashMap::new(),
         };
         // Bind declarations as inert function syntax even in small scripts
         // without an obfuscated pool. Only the bounded evaluator may use them.
@@ -160,6 +164,7 @@ impl<'a> Tables<'a> {
             }
         }
         t.recover()?;
+        t.scopes.borrow_mut().clear();
         Ok(t)
     }
     pub fn all(&self) -> &[Node<'a>] {
@@ -210,6 +215,18 @@ impl<'a> Tables<'a> {
     ) -> Result<Constant<'a>> {
         let previous = self.overrides.replace(overrides);
         let result = self.eval(node, env);
+        self.overrides.replace(previous);
+        result
+    }
+    pub fn invoke_bound(
+        &self,
+        function: Node<'a>,
+        args: Vec<Constant<'a>>,
+        overrides: HashMap<usize, Constant<'a>>,
+    ) -> Result<Constant<'a>> {
+        self.steps.set(0);
+        let previous = self.overrides.replace(overrides);
+        let result = self.invoke(Constant::Function(function), args, 0);
         self.overrides.replace(previous);
         result
     }
@@ -298,6 +315,13 @@ impl<'a> Tables<'a> {
                     let key = child(pair, "key")?;
                     let name = if matches!(key.kind(), "string" | "template_string") {
                         unquote(self.text(key))?
+                    } else if key.kind() == "computed_property_name" {
+                        eval(
+                            key.named_child(0)
+                                .ok_or_else(|| unknown("Computed data key"))?,
+                            env,
+                        )?
+                        .text()?
                     } else {
                         self.text(key).into()
                     };
@@ -305,7 +329,9 @@ impl<'a> Tables<'a> {
                 }
                 Constant::Object(out)
             }
-            "function_expression" | "function_declaration" => Constant::Function(n),
+            "function_expression" | "function_declaration" | "arrow_function" => {
+                Constant::Function(n)
+            }
             "unary_expression" => {
                 let op = self.text(child(n, "operator")?);
                 let value = eval(child(n, "argument")?, env)?;
@@ -409,14 +435,60 @@ impl<'a> Tables<'a> {
                             )
                         }
                     }
+                    Constant::Function(function) if key.text()? == "length" => {
+                        let count = function
+                            .child_by_field_name("parameters")
+                            .map(|parameters| {
+                                children(parameters)
+                                    .into_iter()
+                                    .take_while(|p| p.kind() == "identifier")
+                                    .count()
+                            })
+                            .unwrap_or_else(|| {
+                                usize::from(function.child_by_field_name("parameter").is_some())
+                            });
+                        Constant::Number(count as f64)
+                    }
                     _ => return Err(unknown("Non-data member access")),
                 }
             }
+            "augmented_assignment_expression" => {
+                let left = child(n, "left")?;
+                require(left.kind() == "identifier", "Static compound binding")?;
+                let a = eval(left, env)?.integer()? as i32;
+                let b = eval(child(n, "right")?, env)?.integer()? as i32;
+                let value = match self.text(child(n, "operator")?) {
+                    "^=" => a ^ b,
+                    "&=" => a & b,
+                    "|=" => a | b,
+                    "+=" => a.wrapping_add(b),
+                    "-=" => a.wrapping_sub(b),
+                    _ => return Err(unknown("Static compound operator")),
+                };
+                let value = Constant::Number(value as f64);
+                env.insert(self.text(left).into(), value.clone());
+                value
+            }
             "assignment_expression" => {
                 let left = child(n, "left")?;
-                require(left.kind() == "identifier", "Nonlocal assignment")?;
                 let value = eval(child(n, "right")?, env)?;
-                env.insert(self.text(left).into(), value.clone());
+                if left.kind() == "identifier" {
+                    env.insert(self.text(left).into(), value.clone());
+                } else if left.kind() == "subscript_expression" {
+                    let object = child(left, "object")?;
+                    require(object.kind() == "identifier", "Nonlocal assignment")?;
+                    let index = eval(child(left, "index")?, env)?.integer()?;
+                    require((0..65536).contains(&index), "Static array write bounds")?;
+                    let Some(Constant::Array(values)) = env.get_mut(self.text(object)) else {
+                        return Err(unknown("Nonlocal array assignment"));
+                    };
+                    let target = values
+                        .get_mut(index as usize)
+                        .ok_or_else(|| unknown("Static array write bounds"))?;
+                    *target = value.clone();
+                } else {
+                    return Err(unknown("Nonlocal assignment"));
+                }
                 value
             }
             "sequence_expression" => {
@@ -494,7 +566,7 @@ impl<'a> Tables<'a> {
             return Err(unknown("Not a constant wrapper"));
         };
         let params = children(child(node, "parameters")?);
-        let mut local = Env::new();
+        let mut local = self.scope(node);
         for (i, p) in params.into_iter().enumerate() {
             if p.kind() == "identifier" {
                 if let Some(v) = args.get(i) {
@@ -504,6 +576,19 @@ impl<'a> Tables<'a> {
         }
         for statement in children(child(node, "body")?) {
             match statement.kind() {
+                "empty_statement" => (),
+                "variable_declaration" | "lexical_declaration" => {
+                    for declaration in children(statement) {
+                        if let (Some(name), Some(value)) = (
+                            declaration.child_by_field_name("name"),
+                            declaration.child_by_field_name("value"),
+                        ) {
+                            require(name.kind() == "identifier", "Static wrapper binding")?;
+                            let value = self.evaluate(value, &mut local, depth + 1)?;
+                            local.insert(self.text(name).to_string(), value);
+                        }
+                    }
+                }
                 "return_statement" => {
                     return self.evaluate(
                         statement
@@ -535,7 +620,9 @@ impl<'a> Tables<'a> {
                         for statement in children(case) {
                             if statement.kind() == "return_statement" {
                                 return self.evaluate(
-                                    statement.named_child(0).unwrap(),
+                                    statement
+                                        .named_child(0)
+                                        .ok_or_else(|| unknown("Empty constant return"))?,
                                     &mut local,
                                     depth + 1,
                                 );
@@ -613,7 +700,8 @@ impl<'a> Tables<'a> {
                     if let Some(c) = pat.captures(text) {
                         if c[1] == c[2] {
                             decoder = Some(name);
-                            self.offset = c[3].parse().map_err(|_| unknown("Decoder offset"))?
+                            self.offset = c[3].parse().map_err(|_| unknown("Decoder offset"))?;
+                            self.decoder_node = Some(node.id());
                         }
                     }
                 }
@@ -732,7 +820,8 @@ impl<'a> Tables<'a> {
                 if right.kind() == "identifier" {
                     let value = self.globals.borrow().get(self.text(right)).cloned();
                     if let Some(v) = value {
-                        self.globals.borrow_mut().insert(name, v);
+                        self.globals.borrow_mut().insert(name, v.clone());
+                        self.recovered_bindings.insert(node.id(), v);
                     }
                 } else if right.kind() == "function_expression" && self.text(right).len() < 1000 {
                     self.globals
@@ -744,9 +833,9 @@ impl<'a> Tables<'a> {
                         .map(|n| self.eval(n, &mut Env::new()))
                         .collect::<Result<Vec<_>>>()
                     {
-                        self.globals
-                            .borrow_mut()
-                            .insert(name, Constant::Array(values));
+                        let value = Constant::Array(values);
+                        self.globals.borrow_mut().insert(name, value.clone());
+                        self.recovered_bindings.insert(node.id(), value);
                     }
                 }
             }
@@ -778,8 +867,14 @@ impl<'a> Tables<'a> {
         let rows = self.walk(body, false);
         let mut counts = HashMap::new();
         for n in &rows {
-            if n.kind() == "assignment_expression" {
-                if let Some(left) = n.child_by_field_name("left") {
+            if n.kind() == "assignment_expression"
+                || n.kind() == "variable_declarator" && n.child_by_field_name("value").is_some()
+            {
+                if let Some(left) = n.child_by_field_name(if n.kind() == "assignment_expression" {
+                    "left"
+                } else {
+                    "name"
+                }) {
                     if left.kind() == "identifier" {
                         *counts.entry(self.text(left).to_string()).or_insert(0usize) += 1;
                     }
@@ -794,15 +889,62 @@ impl<'a> Tables<'a> {
                 }
             }
         }
+        if let Some(param) = parent.child_by_field_name("parameter") {
+            local.insert(self.text(param).into(), Constant::Dynamic);
+        }
+        for n in &rows {
+            if n.kind() == "variable_declarator" {
+                if let Some(name) = n
+                    .child_by_field_name("name")
+                    .filter(|n| n.kind() == "identifier")
+                {
+                    local.insert(self.text(name).into(), Constant::Dynamic);
+                }
+            }
+        }
         for name in counts.keys() {
             local.insert(name.clone(), Constant::Dynamic);
         }
         let mut owned = HashSet::new();
+        for n in &rows {
+            if n.kind() == "function_declaration" {
+                if let Some(name) = n.child_by_field_name("name") {
+                    let value = if self.decoder_node == Some(n.id()) {
+                        Constant::Decoder
+                    } else {
+                        Constant::Function(*n)
+                    };
+                    local.insert(self.text(name).into(), value);
+                }
+            }
+        }
+        // A bounded wrapper may close over this same scope while a binding is
+        // being analyzed. Publish only the bindings known so far, rather than
+        // recursively rebuilding an unfinished scope.
+        self.scopes.borrow_mut().insert(parent.id(), local.clone());
         for n in rows {
-            if n.kind() != "assignment_expression" {
+            self.scopes.borrow_mut().insert(parent.id(), local.clone());
+            if !matches!(n.kind(), "assignment_expression" | "variable_declarator") {
                 continue;
             }
-            let (Ok(left), Ok(right)) = (child(n, "left"), child(n, "right")) else {
+            let (Ok(left), Ok(right)) = (
+                child(
+                    n,
+                    if n.kind() == "assignment_expression" {
+                        "left"
+                    } else {
+                        "name"
+                    },
+                ),
+                child(
+                    n,
+                    if n.kind() == "assignment_expression" {
+                        "right"
+                    } else {
+                        "value"
+                    },
+                ),
+            ) else {
                 continue;
             };
             if matches!(left.kind(), "member_expression" | "subscript_expression") {
@@ -818,9 +960,24 @@ impl<'a> Tables<'a> {
                             .and_then(|n| self.eval(n, &mut local.clone()))
                             .and_then(|v| v.text())
                     };
-                    if let (Ok(k), Ok(v)) = (key, self.eval(right, &mut local.clone())) {
-                        if let Some(Constant::Object(map)) = local.get_mut(name) {
-                            map.insert(k, v);
+                    if let Ok(k) = key {
+                        let value = self
+                            .eval(right, &mut local.clone())
+                            .unwrap_or(Constant::Dynamic);
+                        match local.get_mut(name) {
+                            Some(Constant::Object(map)) => {
+                                map.insert(k, value);
+                            }
+                            Some(Constant::Array(values)) => {
+                                if let Some(value_slot) = k
+                                    .parse::<usize>()
+                                    .ok()
+                                    .and_then(|index| values.get_mut(index))
+                                {
+                                    *value_slot = value;
+                                }
+                            }
+                            _ => (),
                         }
                     }
                 }
@@ -830,18 +987,24 @@ impl<'a> Tables<'a> {
                 continue;
             }
             let name = self.text(left);
-            if let Ok(v) = self.eval(right, &mut local.clone()) {
+            if let Some(v) = self
+                .recovered_bindings
+                .get(&n.id())
+                .cloned()
+                .or_else(|| self.eval(right, &mut local.clone()).ok())
+            {
                 if matches!(
                     v,
                     Constant::Text(_)
                         | Constant::Number(_)
                         | Constant::Object(_)
+                        | Constant::Array(_)
                         | Constant::Function(_)
                         | Constant::Decoder
                         | Constant::Bool(_)
                         | Constant::Null
                 ) {
-                    if matches!(v, Constant::Object(_)) {
+                    if matches!(v, Constant::Object(_) | Constant::Array(_)) {
                         owned.insert(name.to_string());
                     }
                     local.insert(name.into(), v);

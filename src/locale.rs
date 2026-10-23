@@ -108,15 +108,17 @@ pub fn calculate(c: &Context<'_>, results: &mut Results) -> Result<()> {
         let f = &c.plan.format;
         let raw = &c.response.raw;
         let mut numbers = Vec::new();
+        let keys = f.instruction_keys(f.state_step);
         for position in m.start..m.end.saturating_sub(11) {
-            let key = f.key(f.byte(raw[position], f.state_step), f.state_step);
-            if f.byte(raw[position + c.plan.kind_slot()?], key) != tag {
-                continue;
-            }
-            let number =
-                f64::from_be_bytes(std::array::from_fn(|i| f.byte(raw[position + 3 + i], key)));
-            if (1e11..=1e13).contains(&number) || (1e15..=1e18).contains(&number) {
-                numbers.push((position, number));
+            for &(_, key) in keys.at(f, raw[position], position) {
+                if f.byte(raw[position + c.plan.kind_slot()?], key) != tag {
+                    continue;
+                }
+                let number =
+                    f64::from_be_bytes(std::array::from_fn(|i| f.byte(raw[position + 3 + i], key)));
+                if (1e11..=1e13).contains(&number) || (1e15..=1e18).contains(&number) {
+                    numbers.push((position, number));
+                }
             }
         }
         let (timestamp, amount, language, words) = operands(&literals, &numbers)?;

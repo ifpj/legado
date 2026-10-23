@@ -11,7 +11,7 @@ function cfChapterHeading(value,bookName) {
         core=core.replace(/^\d+[:、]/,'');
         if(core.indexOf(heading[0])===0)core=core.substring(heading[0].length);
     }
-    if(heading)core=core.replace(/\([^()]*\)?$/,'');
+    core=core.replace(/\([^()]*\)?$/,'');
     return {key:text.replace(/[:、]+$/,''),core:core.replace(/[^a-z0-9\u3400-\u9fff]/g,''),number:heading?heading[1]:'',numbered:!!heading,bookPrefix:bookPrefix};
 }
 function cfNearChapterTitle(a,b){
@@ -30,6 +30,16 @@ function cfCleanChapterText(value,chapterTitle,pageHeading,bookName) {
         var target=cfChapterHeading(values[i],bookName);
         if(target.key&&!/^(半夏小说|69书吧|台湾小说网)$/.test(target.key))targets.push(target);
     }
+    // A numbered title can also be appended directly after the last sentence.
+    // Require exact metadata, a sentence boundary and no enclosing story quote.
+    text=text.replace(/([。！？!?])(第[零〇一二三四五六七八九十百千万两\d０-９]+[章回节卷集话][^\r\n“”‘’"'「」『』【】\[\]]{1,160})\s*$/,function(all,boundary,suffix,at,whole){
+        if(whole.substring(0,at).trim().length<20)return all;
+        var prefix=whole.substring(whole.lastIndexOf('\n',at)+1,at),pairs=[['“','”'],['「','」'],['『','』'],['【','】'],['[',']']];
+        for(var p=0;p<pairs.length;p++)if(prefix.lastIndexOf(pairs[p][0])>prefix.lastIndexOf(pairs[p][1]))return all;
+        var tail=cfChapterHeading(suffix,bookName);
+        for(var t=0;t<targets.length;t++)if(tail.numbered&&tail.core&&tail.key===targets[t].key)return boundary;
+        return all;
+    });
     var lines=text.split('\n'),removed=0;
     // Full text is examined separately for site pollution. Only a leading,
     // standalone heading can be removed by this metadata comparison.
@@ -40,11 +50,12 @@ function cfCleanChapterText(value,chapterTitle,pageHeading,bookName) {
             target=targets[t];
             if(candidate.key.length>=2&&candidate.key===target.key)same=true;
             else if(candidate.numbered&&target.numbered&&candidate.core.length>=1&&candidate.core===target.core)same=true;
-            else if(!candidate.numbered&&target.numbered&&candidate.core.length>=3&&candidate.core===target.core&&!/^[“‘"'「『—-]/.test(lines[0].trim())&&!/[？?]$/.test(lines[0].trim()))same=true;
+            else if(!candidate.numbered&&target.numbered&&candidate.core.length>=3&&candidate.core===target.core&&!/^[“‘"'「『—-]/.test(lines[0].trim())&&!/[。.?？，,；;：:]$/.test(lines[0].trim()))same=true;
             else if(candidate.number&&candidate.number===target.number&&cfNearChapterTitle(candidate.core,target.core))same=true;
             else if(candidate.bookPrefix&&candidate.numbered&&!candidate.core&&target.numbered)same=true;
         }
         var continuation=lines.slice(1).join('\n').replace(/^\s+/,'').split('\n')[0];
+        if(!candidate.numbered&&/^[【\[].+[】\]]$/.test(lines[0].trim())&&/^(?:种类|类型|效果|介绍|等级|品质|属性)[:：]/.test(continuation))same=false;
         if(!candidate.numbered&&/话音刚落|一语惊醒|(?:忍不住|不由|低声|大声|开口|怒)[^。！？!?]{0,16}(?:骂|喊|说|叹)|(?:心想|心道|暗想|想道|骂道|喊道|说道)/.test(continuation))same=false;
         if(!same||lines.slice(1).join('\n').trim().length<20)break;
         lines.shift();removed++;

@@ -312,12 +312,12 @@ fn operands(c: &Context<'_>, m: &crate::catalog::Module) -> Result<(u32, String)
     let anchor = anchors[0];
     let f = &c.plan.format;
     let raw = &c.response.raw;
-    let mut key = f.key(f.byte(raw[anchor.start], f.state_step), f.state_step);
+    let mut key = anchor.instruction_key(raw, f);
     let mut position = anchor.end;
     let mut unary = None;
     for _ in 0..2 {
         require(position + 3 <= m.end, "Semantic conversion bounds")?;
-        let opcode = f.byte(raw[position], key);
+        let opcode = f.opcode(raw[position], key, position);
         require(
             unary.is_none_or(|v| v == opcode),
             "Semantic integer conversion",
@@ -327,7 +327,7 @@ fn operands(c: &Context<'_>, m: &crate::catalog::Module) -> Result<(u32, String)
         position += 3;
     }
     require(
-        position + 3 <= m.end && f.byte(raw[position], key) == f.state_step,
+        position + 3 <= m.end && f.opcode(raw[position], key, position) == f.state_step,
         "Semantic integer operand",
     )?;
     key = f.key(key, f.state_step);
@@ -352,29 +352,31 @@ fn operands(c: &Context<'_>, m: &crate::catalog::Module) -> Result<(u32, String)
     }
     let expected = r"\u0067\u0075\u006c\u0065";
     let mut found = 0;
+    let keys = f.instruction_keys(f.state_step);
     for at in position..(m.end.saturating_sub(expected.len() + 5)).min(position + 1200) {
-        let candidate = f.key(f.byte(raw[at], f.state_step), f.state_step);
-        if f.byte(raw[at + 3], candidate) as usize != expected.len() {
-            continue;
-        }
-        let begin = at + 4;
-        let mut seed = f.seed(begin);
-        let first = f.byte(raw[begin], candidate);
-        let high = (seed >> 16) as u8;
-        let mask = if f.char_mode == "before-subtract" {
-            first ^ high ^ expected.as_bytes()[0].wrapping_add(seed as u8)
-        } else {
-            first ^ (expected.as_bytes()[0] ^ high).wrapping_add(seed as u8)
-        };
-        let mut transform = f.clone();
-        transform.char_xor = mask;
-        let mut bytes = Vec::new();
-        for b in &raw[begin..begin + expected.len()] {
-            bytes.push(transform.char(f.byte(*b, candidate), seed));
-            seed = seed.wrapping_add(2654435769)
-        }
-        if bytes == expected.as_bytes() {
-            found += 1;
+        for &(_, candidate) in keys.at(f, raw[at], at) {
+            if f.byte(raw[at + 3], candidate) as usize != expected.len() {
+                continue;
+            }
+            let begin = at + 4;
+            let mut seed = f.seed(begin);
+            let first = f.byte(raw[begin], candidate);
+            let high = (seed >> 16) as u8;
+            let mask = if f.char_mode == "before-subtract" {
+                first ^ high ^ expected.as_bytes()[0].wrapping_add(seed as u8)
+            } else {
+                first ^ (expected.as_bytes()[0] ^ high).wrapping_add(seed as u8)
+            };
+            let mut transform = f.clone();
+            transform.char_xor = mask;
+            let mut bytes = Vec::new();
+            for b in &raw[begin..begin + expected.len()] {
+                bytes.push(transform.char(f.byte(*b, candidate), seed));
+                seed = seed.wrapping_add(2654435769)
+            }
+            if bytes == expected.as_bytes() {
+                found += 1;
+            }
         }
     }
     require(found == 1, "Fresh semantic regexp input not authenticated")?;

@@ -58,3 +58,55 @@ fn tree_walk_keeps_subtree_boundaries_and_nested_function_policy() {
         1
     );
 }
+
+#[test]
+fn recovered_large_current_pool_is_not_replaced_by_a_budget_failure() {
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/static-pool.json")).unwrap();
+    let extra = ",u(400)".repeat(1500);
+    let source = fixture["source"].as_str().unwrap().replace(
+        "];\n    function a5",
+        &format!("{extra}];\n    function a5"),
+    );
+    let tree = parse(&source);
+    let tables = Tables::new(tree.root_node(), &source).unwrap();
+    let call = tables
+        .all()
+        .iter()
+        .copied()
+        .find(|n| n.kind() == "call_expression" && tables.text(*n) == "a5(ix.q)")
+        .unwrap();
+    assert_eq!(tables.value(call).unwrap().text().unwrap(), "entry-005");
+}
+
+#[test]
+fn lexical_constants_and_computed_wrapper_keys_remain_scope_bound() {
+    let source = "(function(){var base=(x=>x).length+40;function read(){var ops={['add']:function(a,b){var pair;return pair=[b],a+pair[0]}};return ops['add'](base,1)}function shadow(){var base;return base}function parameter(base){return base}return read()})()";
+    let tree = parse(source);
+    let t = Tables::new(tree.root_node(), source).unwrap();
+    let call = t
+        .all()
+        .iter()
+        .copied()
+        .find(|n| t.text(*n) == "ops['add'](base,1)")
+        .unwrap();
+    assert_eq!(t.value(call).unwrap().integer().unwrap(), 42);
+    for name in ["shadow", "parameter"] {
+        let owner = t
+            .all()
+            .iter()
+            .copied()
+            .find(|n| {
+                n.kind() == "function_declaration"
+                    && n.child_by_field_name("name")
+                        .is_some_and(|n| t.text(n) == name)
+            })
+            .unwrap();
+        let returned = walk(owner, false)
+            .into_iter()
+            .find(|n| n.kind() == "return_statement")
+            .unwrap()
+            .named_child(0)
+            .unwrap();
+        assert!(t.value(returned).is_err());
+    }
+}

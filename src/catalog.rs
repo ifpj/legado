@@ -47,6 +47,7 @@ mod tests {
     #[test]
     fn authenticated_descriptor_bytes_are_not_pool_reference_instructions() {
         let literal = |start| Literal {
+            key: None,
             start,
             end: start + 5,
             value: "FakeKey".into(),
@@ -171,7 +172,7 @@ pub fn state_targets(response: &Response, plan: &Plan) -> Result<Vec<Target>> {
     }
     let f = &plan.format;
     let opcode = uint(&profile["opcode"])? as u8;
-    let keys = f.keys(opcode);
+    let keys = f.instruction_keys(opcode);
     let raw = &response.raw;
     let prefix: Vec<_> = array(&profile["prefix"])?
         .iter()
@@ -184,46 +185,47 @@ pub fn state_targets(response: &Response, plan: &Plan) -> Result<Vec<Target>> {
     let targets = slots("target_slots")?;
     let mut found = Vec::new();
     for at in 0..=response.program.code_length - 26 {
-        let key = keys[raw[at] as usize];
-        let byte = |p: usize| f.byte(raw[p], key);
-        let hash = hashes
-            .iter()
-            .fold(0u32, |a, s| (a << 8) | byte(at + 1 + s) as u32);
-        let Some(names) = lookup.get(&hash) else {
-            continue;
-        };
-        let expected: Vec<_> = (0..16)
-            .step_by(4)
-            .flat_map(|g| digests.iter().map(move |s| byte(at + 10 + g + s)))
-            .collect();
-        for name in names {
-            let mut input = prefix.clone();
-            for c in name.encode_utf16() {
-                input.extend(c.to_be_bytes())
-            }
-            let digest = blake3::hash(&input);
-            let digest = digest.as_bytes();
-            if digest[..16] != expected {
-                continue;
-            }
-            let tail = u32::from_be_bytes(digest[28..32].try_into().unwrap());
-            let target = targets
+        for &(_, key) in keys.at(f, raw[at], at) {
+            let byte = |p: usize| f.byte(raw[p], key);
+            let hash = hashes
                 .iter()
-                .fold(0usize, |a, s| (a << 8) | byte(at + 1 + s) as usize)
-                ^ (tail >> 8) as usize;
-            require(
-                target < response.program.code_length,
-                "Authenticated state outside program",
-            )?;
-            let next = byte(at + 1 + uint(&profile["key_slot"])?)
-                ^ uint(&profile["key_mask"])? as u8
-                ^ tail as u8;
-            found.push(Target {
-                name: (*name).into(),
-                at,
-                target,
-                key: next,
-            });
+                .fold(0u32, |a, s| (a << 8) | byte(at + 1 + s) as u32);
+            let Some(names) = lookup.get(&hash) else {
+                continue;
+            };
+            let expected: Vec<_> = (0..16)
+                .step_by(4)
+                .flat_map(|g| digests.iter().map(move |s| byte(at + 10 + g + s)))
+                .collect();
+            for name in names {
+                let mut input = prefix.clone();
+                for c in name.encode_utf16() {
+                    input.extend(c.to_be_bytes())
+                }
+                let digest = blake3::hash(&input);
+                let digest = digest.as_bytes();
+                if digest[..16] != expected {
+                    continue;
+                }
+                let tail = u32::from_be_bytes(digest[28..32].try_into().unwrap());
+                let target = targets
+                    .iter()
+                    .fold(0usize, |a, s| (a << 8) | byte(at + 1 + s) as usize)
+                    ^ (tail >> 8) as usize;
+                require(
+                    target < response.program.code_length,
+                    "Authenticated state outside program",
+                )?;
+                let next = byte(at + 1 + uint(&profile["key_slot"])?)
+                    ^ uint(&profile["key_mask"])? as u8
+                    ^ tail as u8;
+                found.push(Target {
+                    name: (*name).into(),
+                    at,
+                    target,
+                    key: next,
+                });
+            }
         }
     }
     let mut groups = Vec::<Vec<Target>>::new();

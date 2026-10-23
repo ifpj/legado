@@ -5,10 +5,26 @@ vm.runInContext(fs.readFileSync(path.join(__dirname,'../assets/gateway-source.js
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../assets/twkan-parser.js'),'utf8'),context);
 const clean=context.cfCleanTwkanContent;
 const ads=[
+ '无一错一首一发一内一容一在一一看！',
+ '無一錯一首一發一內一容一在一一看！',
+ '无\u200b一错\u2060一首一发一内一容一在一一看！',
+ '【记住全网最快小说站 就来 ，????????????.??????超方便 】',
+ '【記住全網最快小說站 新口号，example.invalid】',
+ '˜”*°•.˜”*°• 69shux.com •°*”˜.•°*”˜',
+ '“”“”“首”“发”“”“”“”“”“”“”“.”“”“”“”',
+ '{什么？你还不知道|阅读ＣＯＭ,无错章节阅读|赶紧google一下吧}',
+ '【得】【奇】【小】【说】【网】【首】【发】“d”“e”“q”“i”“x”“s”“.”“o”“r”“g”',
+ '[德]“旗”【小】[說]“網”【首】【發】[d][e][q][i][x][s][.][o][r][g]',
  '🐤🍟 ➅➈ⓢнυ𝓧.℃ⓞ๓ 💘💜',
  '.o0×X×0o. ➅９ŜĦᑌ𝔁.ᑕ𝕠𝐦 .o0×X×0o.',
  '“”“首”“发”“d”“e”“q”“i”“x”“s”“.”“o”“r”“g”',
  '‘6’‘9’‘s’‘h’‘u’‘x’‘.’‘c’‘o’‘m’',
+ '请记住“”小”说”唯一址”：“w”w”w”.”d”e”q”i”x”s”.”o”r”g，站“长有且只“有这一个网“站，其它网“站随“时断“更。',
+ '“”“首”“发”【d】【e】【q】【i】【x】【s】【.】【o】【r】【g】',
+ '记住首发网站域名??????????.??????',
+ '记住首发网站域名unknown.example.org',
+ '我们郑重向您推荐本书：《任意新书》，阅读地址。',
+ '下一章更精彩：第197章 任意标题，期待您的光临。',
  'GOOGLE搜索TWKAN','ＧＯＯＧＬＥ搜索ＴＷＫＡＮ','Google 搜索 TwKan',
  '记住首发网站域名𝕥𝕨𝕜𝕒𝕟.𝕔𝕠𝕞','本书由𝕥𝕨𝕜𝕒𝕟.𝕔𝕠𝕞全网首发',
  '【写到这里我希望读者记一下我们域名 台湾小说网书库全，𝕥𝕨𝕜𝕒𝕟.𝕔𝕠𝕞任你选 】',
@@ -56,7 +72,17 @@ for(const ad of ads){
  assert.equal(clean('𠮷说：“café，继续。”'+ad+'她回头👩🏽‍🚀，轻声作答。'),ad.includes('台湾小说网')&&!/^[【（(\[]/.test(ad)?'':'𠮷说：“café，继续。”她回头👩🏽‍🚀，轻声作答。','site-name paragraphs are removed; explicitly bracketed inline advertisements retain surrounding prose');
  assert.equal(clean(clean(ad)),clean(ad),'idempotent');
 }
+assert.equal(clean('他一字一句地说：“内容无错，第一版在书店看。”'),'他一字一句地说：“内容无错，第一版在书店看。”','preserve ordinary ones and separate publication words');
+assert.equal(clean('无错首发内容\n\n在看星星。'),'无错首发内容\n\n在看星星。','do not match the watermark across paragraph boundaries');
+assert.equal(clean('【他想建立全网最快小说站】\n\n“记住，先把故事写好。”'),'【他想建立全网最快小说站】\n\n“记住，先把故事写好。”','preserve story references without the bracketed promotion marker');
+assert.equal(clean('她写下“˜”*°•.˜”*°•”作为暗号。'),'她写下“˜”*°•.˜”*°•”作为暗号。','preserve decorative story symbols without a verified domain');
+assert.equal(clean('他说：“先走。”'+'“”“”“首”“发”“”“”“”“”“”“”“.”“”“”“”'+'“再见。”'),'他说：“先走。”“再见。”','preserve both adjacent dialogue quote boundaries');
+assert.equal(clean('她选择了{继续|退出}，并在google上搜索故事。'),'她选择了{继续|退出}，并在google上搜索故事。','preserve ordinary braced choices and search mentions');
+assert.equal(clean('【普通】【剧情】【首】【发】'),'【普通】【剧情】【首】【发】','split publication words alone do not identify an advertisement');
+assert.equal(clean('他说：“先走。”'+'【得】【奇】【小】【说】【网】【首】【发】“d”“e”“q”“i”“x”“s”“.”“o”“r”“g”'+'“再见。”'),'他说：“先走。”“再见。”','split site marker preserves adjacent dialogue boundaries');
 const paragraphs=[
+ '书库广，????????????????n????.c????o????m????超省心',
+ '藏书多，??tw??.??com超方便',
  '记住这个名字：。记住这个域名：。好书不迷路。',
  '免费读全本第337章 共同富裕，链接：。',
  '强力推荐《一本新书》！点击直达故事世界。',
@@ -67,6 +93,12 @@ const paragraphs=[
  '最新更新，已在上线，等待您的解读。',
  '预告：即将更新，请密切关注！',
  '无错版本在读！首发本小说。',
+ '小主，这个章节后面还有哦，请点击下一页继续，后面更精彩！',
+ '本章未完，请点击下一页继续阅读。',
+ '本小章还未完，请点击下一页继续阅读后面精彩内容！',
+ '请“点击” 下 一 页继续，查看更多内容。',
+ '探索都市小说分类，总有一本适合你。',
+ '阅读盛宴：海量图书、极致体验，。',
  '台湾小说网书海量，₮₩₭₳₦.₵Ø₥任你挑',
  '台湾小说网书海量，TWKAN.COM任你挑',
  '台湾小说网书海量，T̶W̶K̶A̶N̶.C̶O̶M̶任你挑',
@@ -104,6 +136,8 @@ for(const ad of paragraphs){
  assert.equal(clean(clean(ad)),clean(ad),'paragraph cleanup is idempotent');
 }
 const keep=[
+ '书库广，里面有他需要的资料。','她写下“书库广，???.???超省心”作为广告分析例子。','书库广，example.com超省心','书库广，??没有域名??超省心',
+ '她点击下一页继续读小说，直到窗外天亮。',
  '他打开 Google 搜索天气，稍后搜索 TWKAN 的含义。','GOOGLE搜索天气。','TWKAN 是他写下的五个字母。',
  '她提到这个网站名字，随后转身离开。','本书首发于出版社，后附作者感言。',
  '【记住本站域名的人忽然回头】','（请记住我的话，明天再见。）',
@@ -113,9 +147,12 @@ const keep=[
  '台湾文学作品在图书馆的书架上。','故事里的网站是69news.com，另一段文字是69fօօx.com。'
 ];
 for(const text of keep)assert.equal(clean(text),text,'preserve narrative: '+text);
+assert.equal(clean('“你知道她吗？”\u2003\u2003本书由𝕥𝕨𝕜𝕒𝕟.𝕔𝕠𝕞全网首发'),'“你知道她吗？”','remove only the whitespace adjoining the verified publication watermark');
 assert.equal(clean(ads[0]+'甲'+ads[1]+'乙'+ads[2]),'甲乙');
 assert.equal(clean('甲'+ads[0]+'\n\n乙'),'甲\n\n乙');
-for(const marker of ['♬💢  💘♧','🐠😳  🐸🐨','♙♕  😲✌','😾🐺  ൠ✌','ஜ۩۞۩ஜ ஜ۩۞۩ஜ'])assert.equal(clean('甲'+marker+'乙'),'甲乙','empty generated emoji envelope');
+for(const marker of ['♬💢  💘♧','🐠😳  🐸🐨','♙♕  😲✌','😾🐺  ൠ✌','ஜ۩۞۩ஜ ஜ۩۞۩ஜ'])assert.equal(clean(marker),'','empty generated emoji ornament line');
+assert.equal(clean('【我已经在路上了，还要十几分钟，到了联系你。😲🏆  ☝🐨】'),'【我已经在路上了，还要十几分钟，到了联系你。😲🏆  ☝🐨】','preserve emoji inside a real chat message');
+assert.equal(clean('水露亚纳听完，表情认真的叫了一声。🍧☠  🐊♥'),'水露亚纳听完，表情认真的叫了一声。','remove a generated emoji envelope glued to prose');
 for(const left of [",-*' ^ '~*-.,_,.-*~",'~*._.-^--^-.',"|'~*__*~'|"]){
  const envelope=left+'\u2003'+left.split('').reverse().join('');
  assert.equal(clean('甲'+envelope+'乙'),'甲乙','empty mirrored generated ornament');
@@ -161,7 +198,45 @@ assert.equal(clean('作者的话：建议阅读心理书籍'),'作者的话：�
 assert.equal(clean('当晚的故事。\n\nSES S E n\n\n第二天早上。'),'当晚的故事。\n\n\n第二天早上。','remove verified standalone Latin noise marker');
 assert.equal(clean('他在纸上写下 SES S E n。'),'他在纸上写下 SES S E n。','keep words quoted within narrative');
 assert.equal(clean('眼眶都<i class="icon icon-uniE0D3"></i><i class="icon icon-uniE0D2"></i>了。'),'眼眶都了。','remove empty escaped source icon tags without inventing missing characters');
+assert.equal(clean('</ins>\n正文\n</ins>'),'\n正文\n','remove malformed literal ad closing tags');
+assert.equal(clean('加载中...　　还有，'),'还有，','remove leading loading marker');
+assert.equal(clean('上文。当&前@章#节$内%容^不&完*整！要~查!看-完_整|章;节)请(退&出%阅#读|模*式！加载中...　　下文。'),'上文。下文。','remove an injected incomplete-chapter template without removing surrounding prose');
+assert.equal(clean('阿妙宝宝。加载中...　　这时，光头兄弟走了出来。'),'阿妙宝宝。这时，光头兄弟走了出来。','remove a loading marker glued inside story prose');
+assert.equal(clean('他摆了摆手：加载中...　　他顿了顿。'),'他摆了摆手：他顿了顿。','remove the verified indented loading marker after a colon');
+assert.equal(clean('他说：“页面关了。加载中...　　稍等。”'),'他说：“页面关了。加载中...　　稍等。”','keep a loading status inside quoted dialogue');
+for(const story of ['【记忆回溯·加载中......】','【门关了。加载中...　　请等待。】','屏幕上显示“加载中......”。','加载中......'])assert.equal(clean(story),story,'preserve narrative loading text without the verified injected template');
+assert.equal(clean('【引力蚀刻】1v3\n\nnaaa里里【引力蚀刻】被提升到I3已经有一个多月'),'【引力蚀刻】1v3\n\n【引力蚀刻】被提升到I3已经有一个多月','remove a narrow damaged import prefix before a bracketed skill');
+assert.equal(clean('书友都在讨论区，畅聊都市小说小说的魅力。'),'','remove imported discussion-area promotion');
+assert.equal(clean('最新章节《》剧情高能！快来！'),'','remove empty-title update promotion');
+assert.equal(clean('好在观众的眼睛是雪亮的，最新章节《》已更新，速来可乐小说追更！真的惊艳的演出不可能被埋没。'),'好在观众的眼睛是雪亮的，真的惊艳的演出不可能被埋没。','remove a glued update advert while retaining both story clauses');
+for(const ad of ['书荒？来看看都市小说小说推荐吧！','这不是广告，是宝藏书籍《任意书名》的安利：。','独行特立的猪的铁粉们，《任意书名》最新章节已发布！','最新章节已就位！书迷速归。'])assert.equal(clean(ad),'','remove generated book/update promotion: '+ad);
+assert.equal(clean('前文，，，畅读《任意书名》等万千好书。但后文继续。'),'前文但后文继续。','remove a glued book promotion and retain surrounding story');
+assert.equal(clean('前文，您的一站式小说阅读港湾。后文。'),'前文后文。','remove a reading-harbour slogan glued to prose');
+assert.equal(clean('前文。独行特立的猪笔下的世界，尽在《任意书名》。后文。'),'前文。后文。','remove an author-and-book promotion glued to prose');
+assert.equal(clean('前文。《任意书名》 - 文笔惊艳，情节跌宕起伏！后文。'),'前文。后文。','remove a book praise promotion glued to prose');
+assert.equal(clean('这绝对是第一次，阅读盛宴：海量图书、极致体验，。这么喜欢这个称呼'),'这绝对是第一次，这么喜欢这个称呼','remove a reading-feast slogan glued to prose');
+for(const ad of ['——您的私人掌上图书馆，随时访问。','本章第709章 神仙打架有惊喜，点我立即解锁。'])assert.equal(clean(ad),'','remove reader-platform promotion: '+ad);
+for(const ad of ['专业的小说网站，提供最舒适的阅读体验，。','立即阅读第357章 金曲奖也来凑热闹：，打开今日精彩。'])assert.equal(clean(ad),'','remove generic reading navigation: '+ad);
+for(const ad of ['最新剧情：，点击追更。','欢迎来到都市小说的奇幻大陆，入口在此：。'])assert.equal(clean(ad),'','remove generated entry promotion: '+ad);
+assert.equal(clean('前文，读《任意书名》，享受阅读时光。后文'),'前文后文','remove a read-this-book promotion glued to prose');
+assert.equal(clean('啊？独行特立的猪力作《任意书名》，点击立即阅读！她愣住了。'),'啊？她愣住了。','remove an author promotion inside dialogue');
+assert.equal(clean('前文。独家！某作者专访及《任意书名》创作幕后，仅限。后文。'),'前文。后文。','remove an exclusive-interview promotion glued to prose');
+assert.equal(clean('“我怎么知道。░▒▓█►─═  ═─◄█▓▒░”'),'“我怎么知道。”','remove a mirrored block ornament inside dialogue');
+assert.equal(clean('她并不吃惊。×º°”˜\`”°º× ×º°”˜\`”°º×\n\n剧情继续。'),'她并不吃惊。\n\n剧情继续。','remove a mirrored Latin-extended ornament glued to prose');
+assert.equal(clean('【暗号×º°”˜\`”°º× ×º°”˜\`”°º×】'),'【暗号×º°”˜\`”°º× ×º°”˜\`”°º×】','preserve mirrored symbols inside a bracketed story message');
+for(const ad of ['69ᏕᏂᏬጀ.ፈᎧᎷ','69§hµx.¢ðm'])assert.equal(clean('前文。'+ad),'前文。','remove a new non-ASCII 69 watermark font');
+assert.equal(clean('地址是69news.com，请记住。'),'地址是69news.com，请记住。','keep an unrelated ASCII domain');
+assert.equal(clean("清晨。,-*' ^ '~*-"),'清晨。','remove dangling watermark ornament after prose');
+assert.equal(clean('九尾、强大、野性......'),'九尾、强大、野性......','preserve narrative ellipsis');
+assert.equal(clean('李茶看向旁边的女仆小第4章 “今天午饭做得不好。”'),'李茶看向旁边的女仆小4 “今天午饭做得不好。”','repair an injected chapter marker inside a numbered character name');
+assert.equal(clean('女仆小第4章 (*?.?*)?'),'女仆小4 (*?.?*)?','repair the same injected chapter marker before an emoticon');
+assert.equal(clean('一套房子，最新章节《》已更新，速来追更！让她成了大家羡慕的对象。'),'一套房子，让她成了大家羡慕的对象。','remove an empty-title update advert without an optional site name');
+assert.equal(clean('作者写下最后一句。\n\n——番茄小说网参与“年度人气作者”活动，为作者助力，有机会赢惊喜好礼！'),'作者写下最后一句。\n','remove a platform activity injection bearing its site name');
 assert.equal(clean('甲。\n>←\n乙。'),'甲。\n乙。','remove verified standalone broken arrow marker');
+assert.equal(clean('八点，您收到了一个新的章节更新：《第707章 任意章名》，阅读链接。歌手总决赛准时开始。'),'八点，歌手总决赛准时开始。','retain both ends of prose around a glued update promotion');
+const bookPromo='《另一本新书》\n\n简介：\n\n一个全新故事的简介。\n\n标签：【奇幻】【冒险】';
+assert.equal(clean('原有剧情完整。\n\n'+bookPromo+'\n\n(本章完)').trim(),'原有剧情完整。','remove a separate structured book-promotion footer');
+assert.equal(clean('他翻开一本书。\n\n'+bookPromo+'\n\n他合上了书，继续赶路。'),'他翻开一本书。\n\n'+bookPromo+'\n\n他合上了书，继续赶路。','do not remove book descriptions inside continuing narrative');
 for(const ad of ['（请记住 台湾小说网体验佳，随机字体域名超给力 网站，观看最快的章节更新）','【台湾小说网书海量，任你挑】','[台湾小说网换成全新随机口号]']){
  assert.equal(clean('不过咱想的就是自污名声，达到退婚的目的，没必要撒谎。'+ad),'不过咱想的就是自污名声，达到退婚的目的，没必要撒谎。','protect story text joined to a bracketed promotion');
 }

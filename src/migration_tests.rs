@@ -89,6 +89,7 @@ fn response(v: &Value, raw: Vec<u8>) -> Result<data::Response> {
     let mut literals = Vec::new();
     for l in v["literals"].as_array().into_iter().flatten() {
         literals.push(data::Literal {
+            key: None,
             start: l["instruction_offset"].as_u64().unwrap_or(0) as usize,
             end: l["end_offset"].as_u64().unwrap_or(0) as usize,
             value: string(&l["value"])?.into(),
