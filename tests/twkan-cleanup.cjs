@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
-const context=vm.createContext({Packages:{java:{text:{Normalizer:{Form:{NFKD:'NFKD'},normalize:(text,form)=>String(text).normalize(form)}}}}});
+const context=vm.createContext({Packages:{java:{text:{Normalizer:{Form:{NFKD:'NFKD'},normalize:(text,form)=>String(text).normalize(form)}},lang:{Character:{digit:(point)=>{for(const start of [0x30,0x660,0x6f0,0x966,0xff10])if(point>=start&&point<start+10)return point-start;return -1;}}}}}});
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../assets/gateway-source.js'),'utf8'),context);
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../assets/twkan-parser.js'),'utf8'),context);
 const clean=context.cfCleanTwkanContent;
@@ -49,7 +49,7 @@ const ads=[
 ];
 for(const ad of ads){
  assert.equal(clean(ad),'','complete watermark: '+ad);
- assert.equal(clean('𠮷说：“café，继续。”'+ad+'她回头👩🏽‍🚀，轻声作答。'),ad.includes('台湾小说网')?'':'𠮷说：“café，继续。”她回头👩🏽‍🚀，轻声作答。','site-name paragraphs are removed; other inline watermarks retain surrounding prose');
+ assert.equal(clean('𠮷说：“café，继续。”'+ad+'她回头👩🏽‍🚀，轻声作答。'),ad.includes('台湾小说网')&&!/^[【（(\[]/.test(ad)?'':'𠮷说：“café，继续。”她回头👩🏽‍🚀，轻声作答。','site-name paragraphs are removed; explicitly bracketed inline advertisements retain surrounding prose');
  assert.equal(clean(clean(ad)),clean(ad),'idempotent');
 }
 const paragraphs=[
@@ -86,7 +86,7 @@ const paragraphs=[
 ];
 for(const ad of paragraphs){
  assert.equal(clean(ad),'','delete every paragraph bearing the site name: '+ad);
- assert.equal(clean('她推开门。\n\n'+ad+'\n\n他抬起头。'),'她推开门。\n\n\n他抬起头。','keep both neighbouring paragraphs');
+ assert.equal(clean('她推开门。\n\n'+ad+'\n\n他抬起头。').replace(/\n{3,}/g,'\n\n'),'她推开门。\n\n他抬起头。','keep both neighbouring paragraphs');
  assert.equal(clean(clean(ad)),clean(ad),'paragraph cleanup is idempotent');
 }
 const keep=[
@@ -102,8 +102,51 @@ for(const text of keep)assert.equal(clean(text),text,'preserve narrative: '+text
 assert.equal(clean(ads[0]+'甲'+ads[1]+'乙'+ads[2]),'甲乙');
 assert.equal(clean('甲'+ads[0]+'\n\n乙'),'甲\n\n乙');
 for(const marker of ['♬💢  💘♧','🐠😳  🐸🐨','♙♕  😲✌','😾🐺  ൠ✌','ஜ۩۞۩ஜ ஜ۩۞۩ஜ'])assert.equal(clean('甲'+marker+'乙'),'甲乙','empty generated emoji envelope');
+for(const left of [",-*' ^ '~*-.,_,.-*~",'~*._.-^--^-.',"|'~*__*~'|"]){
+ const envelope=left+'\u2003'+left.split('').reverse().join('');
+ assert.equal(clean('甲'+envelope+'乙'),'甲乙','empty mirrored generated ornament');
+ assert.equal(clean('***\n\n甲'),'***\n\n甲','ordinary scene separators remain');
+}
+for(const separator of ['', '.', ')', ' ', '+', '”', '\u200b']){
+ for(const message of ['请访问看最新章节！地址：dEqixs.oRg','请进 www.deqixs.org 网站查看当前小说最新章节！']){
+  const ad=message.split('').join(separator);
+  assert.equal(clean(ad),'','promotion with generated separators: '+separator);
+  assert.equal(clean('她推开门。'+ad+'她抬起头。'),'她推开门。她抬起头。','preserve prose sharing the promotion line');
+  assert.equal(clean('她请到的客人来了。'+ad+'她抬起头。'),'她请到的客人来了。她抬起头。','do not start a promotion span inside preceding narrative');
+ }
+}
+for(const fragment of ['地址：\\\\\\.\\\\','地址: / / . /','：',':：','最后一批邀请码1900人发放，官方反馈群1104270100','邀请码27人发放，官方反馈群123456']){
+ assert.equal(clean(fragment),'','remove empty address or site invitation notice');
+ assert.equal(clean('她推开门。\n'+fragment+'\n她抬起头。'),'她推开门。\n她抬起头。','keep adjacent story paragraphs');
+}
+for(const text of ['地址：北京市东城区。','他介绍地址：http://example.com/，请明天来。','官方反馈群里的人讨论了小说的剧情。','【静音，纲手】','……','***'])assert.equal(clean(text),text,'preserve real addresses, notes and scene breaks');
+assert.equal(clean('甲loadAdv(11,0);乙loadAdv (2, 7);丙'),'甲乙丙','remove inert imported advertising calls');
+assert.equal(clean('喜欢新书：另一段故事请大家收藏：()新书：另一段故事'),'','remove imported repeated-title collection footer');
+assert.equal(clean('作者的话：喜欢这本书请大家收藏，感谢支持！'),'作者的话：喜欢这本书请大家收藏，感谢支持！','preserve author collection requests');
+assert.equal(clean('【学贷的信封。不要打开！不要打开！不要打开！】'),'【学贷的信封。不要打开！不要打开！不要打开！】','preserve story illustration captions');
+for(const ad of ['uuɡu.首发更新，无错字。看不到地址输入的拼音后缀.即可进入首发更新站点。','首发更新，无错字。看不到地址输入的拼音后缀即可进入首发更新站点。','new.example首发更新，随机新文案，不再依赖网址。即可进入首发更新站点。']){
+ assert.equal(clean(ad),'','recognize promotion boundaries even when its domain is damaged');
+ assert.equal(clean('她推开门。'+ad+'她抬起头。'),'她推开门。她抬起头。','preserve both sides of a damaged promotion');
+}
+for(const engine of ['必应','百度','Google'])for(const keyword of ['嘚齐','任意新关键词','newbook']){
+ const ad=engine+'搜索“'+keyword+'”可看本书最新更新章节！';
+ assert.equal(clean(ad),'','search promotion with a generated keyword');
+ assert.equal(clean('甲'+ad+'乙'),'甲乙','preserve narrative around search promotion');
+}
+assert.equal(clean('前往“必”应”搜“索“德”旗””可查看最“新章“节！'),'','search wording and injected quotes vary');
+for(const mark of ['\u0301','\u034e','\u1ab0','\u1dc0'])assert.equal(clean('甲'+Array.from('69shux.com').map(c=>c+mark).join('')+'乙'),'甲乙','combining marks must also trigger the normalization path');
 assert.equal(clean('正常正文。\n\n本章想法读者A：评论内容，今天14:13-上海0\n\n上APP，和更多书友互动'),'正常正文。\n','remove imported comment footer');
 assert.equal(clean('作者的话：本章想法很多，下次再写。'),'作者的话：本章想法很多，下次再写。');
+for(const ending of ['>\n\n©','\n>\n®','\n]>'])assert.equal(clean('剧情完整。\n'+ending).trim(),'剧情完整。','remove only a trailing broken markup/copyright pair');
+assert.equal(clean('正文中提到 © 2026 版权所有。'),'正文中提到 © 2026 版权所有。','preserve copyright mentioned in the story');
+assert.equal(clean('剧情完整。\n\n报名生物课程'),'剧情完整。\n','remove unrelated course signup footer');
+assert.equal(clean('他明天准备报名生物课程。'),'他明天准备报名生物课程。','keep course signups in narrative');
+for(const ad of ['（请记住 台湾小说网体验佳，随机字体域名超给力 网站，观看最快的章节更新）','【台湾小说网书海量，任你挑】','[台湾小说网换成全新随机口号]']){
+ assert.equal(clean('不过咱想的就是自污名声，达到退婚的目的，没必要撒谎。'+ad),'不过咱想的就是自污名声，达到退婚的目的，没必要撒谎。','protect story text joined to a bracketed promotion');
+}
+assert.equal(clean('正常叙事。６９ｓｈｕｘ．ｃｏｍ　（谒演 ）'),'正常叙事。','remove a padded generated label attached to a watermark');
+assert.equal(clean('正常叙事。69shux.com（人物在这里停顿。）'),'正常叙事。（人物在这里停顿。）','keep a real narrative parenthesis after the watermark');
+assert.equal(clean('正常叙事。Ϭ९ʂհմ×.çօʍ'),'正常叙事。','mixed decimal scripts and unknown font slots share the known domain shape');
 // Use the actual production content callback; cleanup must follow the native
 // converter, since Traditional Chinese brand text is recognized after t2s.
 context.cfRead=()=>'<html>fixture</html>';

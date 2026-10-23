@@ -23,6 +23,7 @@ const cases=[
  ,['第430章 解决吞食恶龟，帝具香格里拉','第430章 解决吞食恶龟，帝具香格拉','','']
  ,['第232章 【一份相当不错的芽菜回锅肉】（一笑天晴白银大盟110）','第232章 【一份相当不错的芽菜回锅肉】（一','第232章 【一份相当不错的芽菜回锅肉】（一','']
  ,['第372章 羡慕→嫉妒→恨！（6.3k二合一）','第372章 羡慕嫉妒恨！（63k二合一）','','']
+ ,['我替他给你道个歉','第101章 我替他给你道个歉','第101章 我替他给你道个歉','']
 ];
 for(const [line,catalog,heading,book] of cases){
  const cleaned=ctx.cfCleanChapterText(line+'\n\n'+body,catalog,heading,book);
@@ -40,6 +41,7 @@ assert.equal(ctx.cfCleanChapterText(body+'(本章完)','第1章','',''),body);
 assert.equal(ctx.cfCleanChapterText('甲\b乙\t丙\n丁\r\n戊','','',''),'甲乙\t丙\n丁\r\n戊','remove controls without deleting words');
 assert.equal(ctx.cfCleanChapterText('半夏小说\n\n'+body,'','半夏小说',''),'半夏小说\n\n'+body,'ignore site h1 as chapter metadata');
 assert.equal(ctx.cfCleanChapterText('7.5K\n\n'+body,'第1章','',''),'7.5K\n\n'+body,'retain word-count notes');
+for(const line of ['——不如让欧尼谈恋爱试试？','自己的墓为什么不能去看？','“我替他给你道个歉。”'])assert.equal(ctx.cfCleanChapterText(line+'\n\n'+body,'第17章 '+line.replace(/^——|[“”]/g,''),'',''),line+'\n\n'+body,'preserve opening dialogue and questions even if reused as a title');
 assert.equal(ctx.cfCleanChapterText('第431章 解决吞食恶龟，帝具香格里拉\n\n'+body,'第430章 解决吞食恶龟，帝具香格拉','',''),'第431章 解决吞食恶龟，帝具香格里拉\n\n'+body,'near titles require the same chapter number');
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../assets/banxia-parser.js'),'utf8'),ctx);
 assert.equal(ctx.bxCleanContent(body+'\n\n半夏小说，快乐很多'),body+'\n\n');

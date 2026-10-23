@@ -3,11 +3,18 @@ var CF_READER_KEY='jieqi2026abcd12';
 // Other known watermarks use a detection copy without rewriting surrounding text.
 function cfCleanTwkanContent(value) {
     var symbol='(?:[ஜ۩۞ඏൠ\\u2190-\\u2bff]|[\\ud83c-\\ud83e][\\udc00-\\udfff])(?:\\ufe0f)?';
-    var lines=String(value).replace(/(?:^|\n)本章想法[\s\S]*上APP[，,]和更多书友互动\s*$/i,'').replace(new RegExp('(?:'+symbol+'){2}\\u2003{2}(?:'+symbol+'){2}','g'),'').replace(new RegExp('((?:'+symbol+'){2,})\\u2003+\\1','g'),'').replace(/(^|\n)[^\S\r\n]*(?:\]>|>)[^\S\r\n]*(?=\n*$)/,'$1').split('\n');
+    // A bracketed promotion can share a line with the end of a story paragraph.
+    // Remove that explicit wrapper first; unwrapped site-name paragraphs below
+    // are still discarded regardless of their generated slogan or domain.
+    value=String(value).replace(/[（(][^（）()\r\n]*[台臺][湾灣]小[说說][网網][^（）()\r\n]*[）)]|【[^【】\r\n]*[台臺][湾灣]小[说說][网網][^【】\r\n]*】|\[[^\[\]\r\n]*[台臺][湾灣]小[说說][网網][^\[\]\r\n]*\]/g,'');
+    var lines=String(value).replace(/(?:^|\n)本章想法[\s\S]*上APP[，,]和更多书友互动\s*$/i,'').replace(/(?:^|\n)报名[^\n。！？!?]{1,30}(?:课程|培训)\s*$/,'').replace(/loadAdv\s*\(\s*\d+\s*,\s*\d+\s*\)\s*;/gi,'').replace(new RegExp('(?:'+symbol+'){2}\\u2003{2}(?:'+symbol+'){2}','g'),'').replace(new RegExp('((?:'+symbol+'){2,})\\u2003+\\1','g'),'').replace(/(^|\n)[^\S\r\n]*(?:\]>|>)\s*(?:[©®]\s*)?$/,'$1').split('\n');
+    // Empty generated watermarks keep the mirrored ornament but lose the
+    // domain. Require the EM SPACE centre and exact reversed punctuation.
+    for(var empty=0;empty<lines.length;empty++)lines[empty]=lines[empty].replace(/([,.*'"^~_`|!+\- ]{6,})\u2003+([,.*'"^~_`|!+\- ]{6,})/g,function(all,left,right){return left.split('').reverse().join('')===right?'':all;});
     // The site name is the deletion marker. Random slogans and domain fonts
     // do not change the decision; the entire marked paragraph is discarded.
-    lines=lines.filter(function(line){var marker=line.replace(/[\s\u200b-\u200d\u2060\ufeff“”"'⊥]/g,'');return !/[台臺][湾灣]小[说說][网網]|记住更新地址不迷路|本网站分享到(?:Facebook|脸书)|最新小说在.*首发[!！]/i.test(marker)&&!/^小说网(?:首发|手打更新)[.a-z0-9]*$|^前往必(?:应)?搜索$|^(?:原文|(?:更多|最新|热门).*小说)在看[!！。]?$/i.test(marker);});
-    var suspect=/google|搜索|记住首发网站域名|本书由|sudu|首发更新|首[“”]*发|请收|请记住|“德”“旗”|吧书69新|mo[ɔc][.．]|6[】\]]|69[^\r\n]{0,30}[.．]|[\u00a4\u1d00-\u1dbf\u2070-\u24ff\u2776-\u2788\ud835\ud83c\uff10-\uff19\uff21-\uff3a\uff41-\uff5a]/i;
+    lines=lines.filter(function(line){var marker=line.replace(/[\s\u200b-\u200d\u2060\ufeff“”"'⊥]/g,'');return !/[台臺][湾灣]小[说說][网網]|记住更新地址不迷路|本网站分享到(?:Facebook|脸书)|最新小说在.*首发[!！]|邀请码.*官方反馈群\d+/i.test(marker)&&!/^小说网(?:首发|手打更新)[.a-z0-9]*$|^前往必(?:应)?搜索$|^(?:原文|(?:更多|最新|热门).*小说)在看[!！。]?$/i.test(marker)&&!/^喜欢(.+?)请大家收藏[:：][\s\S]*\1\s*$/.test(line)&&!/^\s*(?:[:：]+|地址[:：][\\/.\s]+)\s*$/.test(line);});
+    var suspect=/google|搜[“”]*索|记住首发网站域名|本书由|sudu|首发更新|首[“”]*发|请|“德”“旗”|吧书69新|mo[ɔc][.．]|6[】\]]|69[^\r\n]{0,30}[.．]|[\u00a4-\u1fff\u2070-\u24ff\u2776-\u2788\ud835\ud83c\uff10-\uff19\uff21-\uff3a\uff41-\uff5a]/i;
     // All templates are confined to one line. Avoid per-character mapping of
     // ordinary narrative paragraphs, which is expensive inside Rhino.
     for(var line=0;line<lines.length;line++)if(suspect.test(lines[line]))lines[line]=cfCleanTwkanLine(lines[line]);
@@ -15,7 +22,7 @@ function cfCleanTwkanContent(value) {
 }
 function cfCleanTwkanLine(value) {
     var original=String(value),key='',starts=[],ends=[],ranges=[];
-    var confusable={},glyphs={s:'ѕร丂ƨʂᔕꜱꞩꙅ',h:'ħнᕼ卄ⱨ♄ʜңһђ',u:'ᑌยυㄩцʊ',x:'χж乂᙭хҳ✘〤',c:'¢ςᑕ匚ƈϲɔ',o:'๏øσοоㄖ口ᗝ',m:'мᗰ爪μɱ♏๓ϻ',g:'ɡ'};
+    var confusable={},glyphs={'6':'ϭ',s:'ѕร丂ƨʂᔕꜱꞩꙅ',h:'ħнᕼ卄ⱨ♄ʜңһђ',u:'ᑌยυㄩцʊ',x:'χж乂᙭хҳ✘〤×',c:'¢ςᑕ匚ƈϲɔ',o:'๏øσοоㄖ口ᗝ',m:'мᗰ爪μɱ♏๓ϻ',g:'ɡ'};
     for(var letter in glyphs)for(var glyph=0;glyph<glyphs[letter].length;glyph++)confusable[glyphs[letter].charAt(glyph)]=letter;
     for(var i=0;i<original.length;){
         var begin=i,point=original.charCodeAt(i++),piece=original.charAt(begin);
@@ -24,6 +31,7 @@ function cfCleanTwkanLine(value) {
             if(low>=0xdc00&&low<=0xdfff){point=0x10000+((point-0xd800)<<10)+low-0xdc00;piece=original.substring(begin,++i);}
         }
         if(point>=0x1f130&&point<=0x1f149)piece=String.fromCharCode(97+point-0x1f130);
+        else if(Packages.java.lang.Character.digit(point,10)>=0)piece=String(Packages.java.lang.Character.digit(point,10));
         else if(point>=0x1f150&&point<=0x1f169)piece=String.fromCharCode(97+point-0x1f150);
         else if(point>=0x1f170&&point<=0x1f189)piece=String.fromCharCode(97+point-0x1f170);
         else if(point>=0x2776&&point<=0x277e)piece=String(point-0x2775);
@@ -48,7 +56,7 @@ function cfCleanTwkanLine(value) {
     match(/记住首发网站域名[ \t]*twkan\.com/g);
     match(/本书由[ \t]*twkan\.com[ \t]*全网首发/g);
     match(/“德”“旗”“小”“说”“网”“手打”“更新”|吧书69新/g);
-    match(/sudugu\.cc首发更新,无错字。看不到地址输入的拼音后缀\.cc即可进入首发更新站点。/g);
+    match(/[a-z0-9.]*首发更新[^\r\n]*?即可进入首发更新站点[。.]?/g);
     function quoted(text){return text.split('').join('[“”" ]*');}
     match(new RegExp('(?:'+quoted('请收藏')+'|'+quoted('请记住')+')[^\\r\\n]*?'+quoted('其它网站随时断更')+'[“”。]*','g'),new RegExp(quoted('唯一网址')));
     // Keep a positional index while discarding ornament separators. Chinese
@@ -59,6 +67,17 @@ function cfCleanTwkanLine(value) {
         if(/[a-z0-9.\u00c0-\u1fff\u3400-\u9fff]/.test(key.charAt(k))){fontChars.push(key.charAt(k));fontPositions.push(k);}
     }
     var domainKey=domainChars.join(''),domain=/69shuxco?m|mocxuhs[69]{1,2}/g,found,domains=[];
+    // The inserted separators and letter case are random. Match the promotion
+    // in the compact index, then remove only its original span: some ads share
+    // a line with the next story paragraph.
+    var notice=/请(?:访问|进入?|到|前往)[a-z0-9看读阅最当前新章节址地网站小说]*?deqixsorg(?:网站[\u3400-\u9fff]*?最新章节)?|(?:前往)?(?:必应|百度|google)搜索[a-z0-9\u3400-\u9fff]*?可?(?:看|阅读|查看)(?:本书|小说)?最新(?:更新)?章节/g;
+    while((found=notice.exec(domainKey))!==null){
+        var noticeEnd=positions[found.index+found[0].length-1]+1;
+        var noticeTail=key.substring(noticeEnd).match(/^[^a-z0-9\u3400-\u9fff\r\n]*[!！]/);
+        if(noticeTail)noticeEnd+=noticeTail[0].length;
+        else while(/[.．)）]/.test(key.charAt(noticeEnd)))noticeEnd++;
+        add(positions[found.index],noticeEnd);
+    }
     while((found=domain.exec(domainKey))!==null)domains.push({from:positions[found.index],to:positions[found.index+found[0].length-1]+1});
     // Unknown non-ASCII font glyphs are allowed in their fixed slots; already
     // restored ASCII letters must agree, so unrelated 69xxxx domains stay intact.
@@ -81,6 +100,9 @@ function cfCleanTwkanLine(value) {
         // Decorative envelopes are stripped only when present on both sides of
         // this known watermark, never by deleting arbitrary emoji-only lines.
         if(key.substring(left,from).replace(/\s/g,'')&&key.substring(to,right).replace(/\s/g,'')){from=left;to=right;}
+        // Some watermark generators append a short, padded Chinese label.
+        var label=original.substring(ends[to-1]).match(/^[ \u3000]+（[\u3400-\u9fff]{1,4}[ \u3000]+）/);
+        if(label){var labelEnd=ends[to-1]+label[0].length;while(to<key.length&&starts[to]<labelEnd)to++;}
         add(from,to);
     }
     if(!ranges.length)return original;

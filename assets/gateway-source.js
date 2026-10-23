@@ -40,6 +40,7 @@ function cfCleanChapterText(value,chapterTitle,pageHeading,bookName) {
             target=targets[t];
             if(candidate.key.length>=2&&candidate.key===target.key)same=true;
             else if(candidate.numbered&&target.numbered&&candidate.core.length>=1&&candidate.core===target.core)same=true;
+            else if(!candidate.numbered&&target.numbered&&candidate.core.length>=3&&candidate.core===target.core&&!/^[“‘"'「『—-]|[。！？!?]$/.test(lines[0].trim()))same=true;
             else if(candidate.number&&candidate.number===target.number&&cfNearChapterTitle(candidate.core,target.core))same=true;
             else if(candidate.bookPrefix&&candidate.numbered&&!candidate.core&&target.numbered)same=true;
         }
