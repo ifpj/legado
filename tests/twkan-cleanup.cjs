@@ -1,10 +1,14 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
-const context=vm.createContext({Packages:{java:{text:{Normalizer:{Form:{NFKD:'NFKD'},normalize:(text,form)=>String(text).normalize(form)}},lang:{Character:{digit:(point)=>{for(const start of [0x30,0x660,0x6f0,0x966,0xff10])if(point>=start&&point<start+10)return point-start;return -1;}}}}}});
+const context=vm.createContext({Packages:{java:{text:{Normalizer:{Form:{NFKD:'NFKD'},normalize:(text,form)=>String(text).normalize(form)}},lang:{Character:{digit:(point)=>{for(const start of [0x30,0x660,0x6f0,0x966,0xe50,0xff10])if(point>=start&&point<start+10)return point-start;return -1;}}}}}});
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../assets/gateway-source.js'),'utf8'),context);
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../assets/twkan-parser.js'),'utf8'),context);
 const clean=context.cfCleanTwkanContent;
 const ads=[
+ '🐤🍟 ➅➈ⓢнυ𝓧.℃ⓞ๓ 💘💜',
+ '.o0×X×0o. ➅９ŜĦᑌ𝔁.ᑕ𝕠𝐦 .o0×X×0o.',
+ '“”“首”“发”“d”“e”“q”“i”“x”“s”“.”“o”“r”“g”',
+ '‘6’‘9’‘s’‘h’‘u’‘x’‘.’‘c’‘o’‘m’',
  'GOOGLE搜索TWKAN','ＧＯＯＧＬＥ搜索ＴＷＫＡＮ','Google 搜索 TwKan',
  '记住首发网站域名𝕥𝕨𝕜𝕒𝕟.𝕔𝕠𝕞','本书由𝕥𝕨𝕜𝕒𝕟.𝕔𝕠𝕞全网首发',
  '【写到这里我希望读者记一下我们域名 台湾小说网书库全，𝕥𝕨𝕜𝕒𝕟.𝕔𝕠𝕞任你选 】',
@@ -53,6 +57,16 @@ for(const ad of ads){
  assert.equal(clean(clean(ad)),clean(ad),'idempotent');
 }
 const paragraphs=[
+ '记住这个名字：。记住这个域名：。好书不迷路。',
+ '免费读全本第337章 共同富裕，链接：。',
+ '强力推荐《一本新书》！点击直达故事世界。',
+ '在“人人书库”APP上可阅读《一本新书》无广告的最新更新章节，超一百万书籍全部免费阅读。即可访问APP官网',
+ '无论何时何地，可乐小说（）都是您最忠实的阅读伴侣。',
+ '收藏，随时随地继续阅读《完全不同的书名》。',
+ '点击，打开《另一部作品》的奇妙旅程。',
+ '最新更新，已在上线，等待您的解读。',
+ '预告：即将更新，请密切关注！',
+ '无错版本在读！首发本小说。',
  '台湾小说网书海量，₮₩₭₳₦.₵Ø₥任你挑',
  '台湾小说网书海量，TWKAN.COM任你挑',
  '台湾小说网书海量，T̶W̶K̶A̶N̶.C̶O̶M̶任你挑',
@@ -141,6 +155,13 @@ for(const ending of ['>\n\n©','\n>\n®','\n]>'])assert.equal(clean('剧情完�
 assert.equal(clean('正文中提到 © 2026 版权所有。'),'正文中提到 © 2026 版权所有。','preserve copyright mentioned in the story');
 assert.equal(clean('剧情完整。\n\n报名生物课程'),'剧情完整。\n','remove unrelated course signup footer');
 assert.equal(clean('他明天准备报名生物课程。'),'他明天准备报名生物课程。','keep course signups in narrative');
+assert.equal(clean('剧情完整。\n\n阅读心理书籍'),'剧情完整。\n','remove unrelated reading recommendation footer');
+assert.equal(clean('她准备阅读心理书籍。'),'她准备阅读心理书籍。','preserve reading described in narrative');
+assert.equal(clean('作者的话：建议阅读心理书籍'),'作者的话：建议阅读心理书籍','preserve author recommendations');
+assert.equal(clean('当晚的故事。\n\nSES S E n\n\n第二天早上。'),'当晚的故事。\n\n\n第二天早上。','remove verified standalone Latin noise marker');
+assert.equal(clean('他在纸上写下 SES S E n。'),'他在纸上写下 SES S E n。','keep words quoted within narrative');
+assert.equal(clean('眼眶都<i class="icon icon-uniE0D3"></i><i class="icon icon-uniE0D2"></i>了。'),'眼眶都了。','remove empty escaped source icon tags without inventing missing characters');
+assert.equal(clean('甲。\n>←\n乙。'),'甲。\n乙。','remove verified standalone broken arrow marker');
 for(const ad of ['（请记住 台湾小说网体验佳，随机字体域名超给力 网站，观看最快的章节更新）','【台湾小说网书海量，任你挑】','[台湾小说网换成全新随机口号]']){
  assert.equal(clean('不过咱想的就是自污名声，达到退婚的目的，没必要撒谎。'+ad),'不过咱想的就是自污名声，达到退婚的目的，没必要撒谎。','protect story text joined to a bracketed promotion');
 }

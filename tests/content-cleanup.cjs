@@ -31,6 +31,9 @@ for(const [line,catalog,heading,book] of cases){
  assert.equal(ctx.cfCleanChapterText(cleaned,catalog,heading,book),cleaned,'idempotent');
 }
 assert.equal(ctx.cfCleanChapterText('第1章 绯红\n第1章 绯红\n'+body,'1.第1章 绯红','',''),body);
+assert.equal(ctx.cfCleanChapterText('异香妙用！\n\n'+body,'第186章 异香妙用！','第186章 异香妙用！',''),body,'remove unnumbered repeated heading with punctuation');
+const openingSpeech='什么破任务！！！\n\n陆绣看着前方魔力乱飙的两人，忍不住骂了一句。\n\n还下午茶！';
+assert.equal(ctx.cfCleanChapterText('第260章 什么破任务\n\n'+openingSpeech,'第260章 什么破任务','',''),openingSpeech,'keep opening exclamation when the following paragraph attributes speech');
 const internal=body+'\n\n他提到“第1章 绯红”，又翻过一页。\n\n第1章 绯红\n\n这行是角色正在读的书中内容。';
 assert.equal(ctx.cfCleanChapterText(internal,'第1章 绯红','',''),internal,'do not globally erase title references');
 assert.equal(ctx.cfCleanChapterText('第1章 绯红'+body,'第1章 绯红','',''),'第1章 绯红'+body,'whole title line only');

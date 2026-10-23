@@ -40,10 +40,12 @@ function cfCleanChapterText(value,chapterTitle,pageHeading,bookName) {
             target=targets[t];
             if(candidate.key.length>=2&&candidate.key===target.key)same=true;
             else if(candidate.numbered&&target.numbered&&candidate.core.length>=1&&candidate.core===target.core)same=true;
-            else if(!candidate.numbered&&target.numbered&&candidate.core.length>=3&&candidate.core===target.core&&!/^[“‘"'「『—-]|[。！？!?]$/.test(lines[0].trim()))same=true;
+            else if(!candidate.numbered&&target.numbered&&candidate.core.length>=3&&candidate.core===target.core&&!/^[“‘"'「『—-]/.test(lines[0].trim())&&!/[？?]$/.test(lines[0].trim()))same=true;
             else if(candidate.number&&candidate.number===target.number&&cfNearChapterTitle(candidate.core,target.core))same=true;
             else if(candidate.bookPrefix&&candidate.numbered&&!candidate.core&&target.numbered)same=true;
         }
+        var continuation=lines.slice(1).join('\n').replace(/^\s+/,'').split('\n')[0];
+        if(!candidate.numbered&&/话音刚落|一语惊醒|(?:忍不住|不由|低声|大声|开口|怒)[^。！？!?]{0,16}(?:骂|喊|说|叹)|(?:心想|心道|暗想|想道|骂道|喊道|说道)/.test(continuation))same=false;
         if(!same||lines.slice(1).join('\n').trim().length<20)break;
         lines.shift();removed++;
     }

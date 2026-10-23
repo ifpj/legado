@@ -2,19 +2,22 @@ var CF_READER_KEY='jieqi2026abcd12';
 // Delete site-name paragraphs regardless of the random slogan or domain font.
 // Other known watermarks use a detection copy without rewriting surrounding text.
 function cfCleanTwkanContent(value) {
+    value=String(value).replace(/<i\s+class=(["'])icon\s+icon-uni[0-9a-f]+\1\s*>\s*<\/i>/gi,'');
+    value=String(value).replace(/(?:^|\n)[ \t]*SES[ \t]+S[ \t]+E[ \t]+n[ \t]*(?=\n|$)/g,'');
     var symbol='(?:[ஜ۩۞ඏൠ\\u2190-\\u2bff]|[\\ud83c-\\ud83e][\\udc00-\\udfff])(?:\\ufe0f)?';
     // A bracketed promotion can share a line with the end of a story paragraph.
     // Remove that explicit wrapper first; unwrapped site-name paragraphs below
     // are still discarded regardless of their generated slogan or domain.
     value=String(value).replace(/[（(][^（）()\r\n]*[台臺][湾灣]小[说說][网網][^（）()\r\n]*[）)]|【[^【】\r\n]*[台臺][湾灣]小[说說][网網][^【】\r\n]*】|\[[^\[\]\r\n]*[台臺][湾灣]小[说說][网網][^\[\]\r\n]*\]/g,'');
-    var lines=String(value).replace(/(?:^|\n)本章想法[\s\S]*上APP[，,]和更多书友互动\s*$/i,'').replace(/(?:^|\n)报名[^\n。！？!?]{1,30}(?:课程|培训)\s*$/,'').replace(/loadAdv\s*\(\s*\d+\s*,\s*\d+\s*\)\s*;/gi,'').replace(new RegExp('(?:'+symbol+'){2}\\u2003{2}(?:'+symbol+'){2}','g'),'').replace(new RegExp('((?:'+symbol+'){2,})\\u2003+\\1','g'),'').replace(/(^|\n)[^\S\r\n]*(?:\]>|>)\s*(?:[©®]\s*)?$/,'$1').split('\n');
+    var lines=String(value).replace(/(?:^|\n)本章想法[\s\S]*上APP[，,]和更多书友互动\s*$/i,'').replace(/(?:^|\n)(?:报名[^\n。！？!?]{1,30}(?:课程|培训)|阅读[^\n。！？!?]{1,30}书籍)\s*$/,'').replace(/loadAdv\s*\(\s*\d+\s*,\s*\d+\s*\)\s*;/gi,'').replace(new RegExp('(?:'+symbol+'){2}\\u2003{2}(?:'+symbol+'){2}','g'),'').replace(new RegExp('((?:'+symbol+'){2,})\\u2003+\\1','g'),'').replace(/(^|\n)[^\S\r\n]*(?:\]>|>)\s*(?:[©®]\s*)?$/,'$1').split('\n');
     // Empty generated watermarks keep the mirrored ornament but lose the
     // domain. Require the EM SPACE centre and exact reversed punctuation.
     for(var empty=0;empty<lines.length;empty++)lines[empty]=lines[empty].replace(/([,.*'"^~_`|!+\- ]{6,})\u2003+([,.*'"^~_`|!+\- ]{6,})/g,function(all,left,right){return left.split('').reverse().join('')===right?'':all;});
+    lines=lines.filter(function(line){return !/可[乐樂]小[说說]|人人[书書][库庫]|记住这个域名|免费读全本.*链接|强力推荐.*点击直达|APP.*最新更新章节.*访问APP官网|^(?:点击|收藏)[，,].*《[^》]+》|^最新(?:更新|章节)[，,].*(?:上线|解读|阅读)|^预告[:：]即将更新[，,].*关注|无错版本.*(?:在读|首发)|首发本小说|^>[←→]$/i.test(line.trim());});
     // The site name is the deletion marker. Random slogans and domain fonts
     // do not change the decision; the entire marked paragraph is discarded.
     lines=lines.filter(function(line){var marker=line.replace(/[\s\u200b-\u200d\u2060\ufeff“”"'⊥]/g,'');return !/[台臺][湾灣]小[说說][网網]|记住更新地址不迷路|本网站分享到(?:Facebook|脸书)|最新小说在.*首发[!！]|邀请码.*官方反馈群\d+/i.test(marker)&&!/^小说网(?:首发|手打更新)[.a-z0-9]*$|^前往必(?:应)?搜索$|^(?:原文|(?:更多|最新|热门).*小说)在看[!！。]?$/i.test(marker)&&!/^喜欢(.+?)请大家收藏[:：][\s\S]*\1\s*$/.test(line)&&!/^\s*(?:[:：]+|地址[:：][\\/.\s]+)\s*$/.test(line);});
-    var suspect=/google|搜[“”]*索|记住首发网站域名|本书由|sudu|首发更新|首[“”]*发|请|“德”“旗”|吧书69新|mo[ɔc][.．]|6[】\]]|69[^\r\n]{0,30}[.．]|[\u00a4-\u1fff\u2070-\u24ff\u2776-\u2788\ud835\ud83c\uff10-\uff19\uff21-\uff3a\uff41-\uff5a]/i;
+    var suspect=/google|搜[“”]*索|记住首发网站域名|本书由|sudu|首发更新|首[“”]*发|请|“德”“旗”|吧书69新|mo[ɔc][.．]|6|[\u00a4-\u1fff\u2070-\u24ff\u2776-\u2788\ud835\ud83c\uff10-\uff19\uff21-\uff3a\uff41-\uff5a]/i;
     // All templates are confined to one line. Avoid per-character mapping of
     // ordinary narrative paragraphs, which is expensive inside Rhino.
     for(var line=0;line<lines.length;line++)if(suspect.test(lines[line]))lines[line]=cfCleanTwkanLine(lines[line]);
@@ -30,7 +33,8 @@ function cfCleanTwkanLine(value) {
             var low=original.charCodeAt(i);
             if(low>=0xdc00&&low<=0xdfff){point=0x10000+((point-0xd800)<<10)+low-0xdc00;piece=original.substring(begin,++i);}
         }
-        if(point>=0x1f130&&point<=0x1f149)piece=String.fromCharCode(97+point-0x1f130);
+        if(confusable[piece])piece=confusable[piece];
+        else if(point>=0x1f130&&point<=0x1f149)piece=String.fromCharCode(97+point-0x1f130);
         else if(Packages.java.lang.Character.digit(point,10)>=0)piece=String(Packages.java.lang.Character.digit(point,10));
         else if(point>=0x1f150&&point<=0x1f169)piece=String.fromCharCode(97+point-0x1f150);
         else if(point>=0x1f170&&point<=0x1f189)piece=String.fromCharCode(97+point-0x1f170);
@@ -58,6 +62,7 @@ function cfCleanTwkanLine(value) {
     match(/“德”“旗”“小”“说”“网”“手打”“更新”|吧书69新/g);
     match(/[a-z0-9.]*首发更新[^\r\n]*?即可进入首发更新站点[。.]?/g);
     function quoted(text){return text.split('').join('[“”" ]*');}
+    match(new RegExp('(?:“[“”"]*)?'+quoted('首发deqixs')+'[“”" ]*\\.[“”" ]*'+quoted('org')+'[”"]*','g'));
     match(new RegExp('(?:'+quoted('请收藏')+'|'+quoted('请记住')+')[^\\r\\n]*?'+quoted('其它网站随时断更')+'[“”。]*','g'),new RegExp(quoted('唯一网址')));
     // Keep a positional index while discarding ornament separators. Chinese
     // narrative remains a boundary; matching the fixed marker needs no wildcards.
@@ -87,7 +92,10 @@ function cfCleanTwkanLine(value) {
         for(var f=0;f<letters.length;f++)if(/[a-z]/.test(letters.charAt(f))&&letters.charAt(f)!==expected.charAt(f))valid=false;
         if(valid)domains.push({from:fontPositions[found.index],to:fontPositions[found.index+found[0].length-1]+1});
     }
-    var decoration=/[\sღ‿⁀⁔ஜ۩۞ඏൠ\u00b8\u00f8\u00a4\u00ba\u00b0\u00a7\u00a8\u00af\u00b4\u00d7\u00f7`,'~!*_|.\-«»<>()v【】\[\]\u200b-\u200f\u2060\ufe0e\ufe0f\u1d00-\u1dbf\u2070-\u209f\u2190-\u2bff\u2022\u00b7\ud83c-\ud83e\udc00-\udfff]/;
+    // The generator sometimes wraps the domain in a short .o0×X×0o. envelope.
+    // These characters are decoration only when adjacent to an already-known
+    // domain; they are never removed as a standalone pattern.
+    var decoration=/[\sღ‿⁀⁔ஜ۩۞ඏൠ\u00b8\u00f8\u00a4\u00ba\u00b0\u00a7\u00a8\u00af\u00b4\u00d7\u00f7`,'~!*_|.\-«»<>()vOoXx0【】\[\]\u200b-\u200f\u2060\ufe0e\ufe0f\u1d00-\u1dbf\u2070-\u209f\u2190-\u2bff\u2022\u00b7\ud83c-\ud83e\udc00-\udfff]/;
     for(var d=0;d<domains.length;d++){
         var from=domains[d].from,to=domains[d].to,left=from,right=to;
         if(/[a-z0-9.-]/.test(key.charAt(from-1))||/[a-z0-9.-]/.test(key.charAt(to)))continue;
@@ -103,6 +111,7 @@ function cfCleanTwkanLine(value) {
         // Some watermark generators append a short, padded Chinese label.
         var label=original.substring(ends[to-1]).match(/^[ \u3000]+（[\u3400-\u9fff]{1,4}[ \u3000]+）/);
         if(label){var labelEnd=ends[to-1]+label[0].length;while(to<key.length&&starts[to]<labelEnd)to++;}
+        if(key.charAt(from-1)==='‘'&&key.charAt(to)==='’'){from--;to++;}
         add(from,to);
     }
     if(!ranges.length)return original;
