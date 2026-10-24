@@ -801,6 +801,7 @@ pub(crate) fn compile_prepared(source: &str, frame: bool) -> Result<Plan> {
         meta["property_profile"] = profiles::properties(&tables, &f)?;
         meta["immediate_profile"] = profiles::immediate(&tables, &f)?;
         meta["input_data_profile"] = profiles::inputs(&tables, &f)?;
+        meta["boundaryProfileVersion"] = json!(2);
         if let Ok((opcode, salt)) = profiles::framed_salt(&tables) {
             meta["input_data_profile"]["flow-call"] = json!([opcode,[],{"salt":salt}]);
         }

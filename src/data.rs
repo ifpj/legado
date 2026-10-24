@@ -365,7 +365,8 @@ impl Plan {
                 Ok(
                     hashes.contains(string(&plan["key_material"]["program_sha256"])?)
                         && source.contains(string(&plan["build"])?)
-                        && source.contains(string(&plan["key_material"]["helper"])?),
+                        && source.contains(string(&plan["key_material"]["helper"])?)
+                        && (!frame || plan["boundaryProfileVersion"] == 2),
                 )
             },
             || {
@@ -597,6 +598,18 @@ pub(crate) fn literals_bounded(
     binary: bool,
     max_work: usize,
 ) -> Result<Vec<Literal>> {
+    literals_excluding(raw, p, plan, overlaps, max_units, binary, max_work, &[])
+}
+fn literals_excluding(
+    raw: &[u8],
+    p: &Program,
+    plan: &Plan,
+    overlaps: bool,
+    max_units: usize,
+    binary: bool,
+    max_work: usize,
+    excluded: &[(usize, usize)],
+) -> Result<Vec<Literal>> {
     let f = &plan.format;
     let tag = plan.literal_tag()?;
     let slot = plan.kind_slot()?;
@@ -610,9 +623,19 @@ pub(crate) fn literals_bounded(
     let keys = f.instruction_keys(f.state_step);
     let (mut result, mut occupied, mut occupied_frame, mut work) =
         (Vec::<Literal>::new(), 0, false, 0usize);
+    let mut excluded_index = 0;
     for start in 0..p.code_length.saturating_sub(4) {
         if start % 256 == 0 {
             crate::cpu::check()?;
+        }
+        while excluded_index < excluded.len() && excluded[excluded_index].1 <= start {
+            excluded_index += 1;
+        }
+        if excluded
+            .get(excluded_index)
+            .is_some_and(|(a, _)| *a <= start)
+        {
+            continue;
         }
         let mut candidates = Vec::new();
         for &(_, key) in keys.at(f, raw[start], start) {
@@ -798,11 +821,21 @@ impl<'a> IntoIterator for &'a LiteralList {
         self.values.iter()
     }
 }
+#[cfg(test)]
 fn recover_literals(
     raw: &[u8],
     program: &Program,
     plan: &Plan,
     all: &mut Vec<Literal>,
+) -> Result<()> {
+    recover_literals_excluding(raw, program, plan, all, &[])
+}
+fn recover_literals_excluding(
+    raw: &[u8],
+    program: &Program,
+    plan: &Plan,
+    all: &mut Vec<Literal>,
+    excluded: &[(usize, usize)],
 ) -> Result<()> {
     let raw = &raw[..program.code_length];
     let protected: Vec<_> = all
@@ -812,7 +845,16 @@ fn recover_literals(
         .collect();
     let seen: HashSet<_> = all.iter().map(|l| (l.start, l.value.clone())).collect();
     let mut budget = 8 * 1024 * 1024usize;
-    for l in literals(raw, program, plan, true, 64, false)? {
+    for l in literals_excluding(
+        raw,
+        program,
+        plan,
+        true,
+        64,
+        false,
+        8 * 1024 * 1024,
+        excluded,
+    )? {
         crate::cpu::check()?;
         if l.packed.is_some()
             || seen.contains(&(l.start, l.value.clone()))
@@ -873,6 +915,26 @@ fn literal_call_anchor(
 #[path = "data/recovery_tests.rs"]
 mod recovery_tests;
 
+fn response_literals(raw: &[u8], program: &Program, plan: &Plan) -> Result<Vec<Literal>> {
+    let checked = checked_instruction_spans(&raw[..program.code_length], plan)?;
+    let mut all = literals_excluding(
+        raw,
+        program,
+        plan,
+        false,
+        65535,
+        false,
+        8 * 1024 * 1024,
+        &checked,
+    )?;
+    recover_literals_excluding(raw, program, plan, &mut all, &checked)?;
+    all.sort_by_key(|l| l.start);
+    let conflicts =
+        conflicting_literals_with_spans(&raw[..program.code_length], &all, plan, &checked)?;
+    all.retain(|l| !conflicts.contains(&l.start));
+    Ok(all)
+}
+
 #[derive(Clone)]
 pub struct Response {
     pub raw: Vec<u8>,
@@ -885,11 +947,7 @@ impl Response {
         crate::cpu::check()?;
         let raw = STANDARD.decode(encoded)?;
         let program = program(&raw, &plan.format, unframed)?;
-        let mut all = literals(&raw, &program, plan, false, 65535, false)?;
-        recover_literals(&raw, &program, plan, &mut all)?;
-        all.sort_by_key(|l| l.start);
-        let conflicts = conflicting_literals(&raw[..program.code_length], &all, plan)?;
-        all.retain(|l| !conflicts.contains(&l.start));
+        let all = response_literals(&raw, &program, plan)?;
         let packed = packed_texts(&all)?;
         Ok(Self {
             raw,
@@ -1086,10 +1144,41 @@ pub(crate) fn framed_end(
         None
     }
 }
+#[cfg(test)]
 pub(crate) fn conflicting_literals(
     raw: &[u8],
     literals: &[Literal],
     plan: &Plan,
+) -> Result<HashSet<usize>> {
+    let checked = checked_instruction_spans(raw, plan)?;
+    conflicting_literals_with_spans(raw, literals, plan, &checked)
+}
+fn checked_instruction_spans(raw: &[u8], plan: &Plan) -> Result<Vec<(usize, usize)>> {
+    let Some(entry) = plan.meta["input_data_profile"].get("flow-call") else {
+        return Ok(Vec::new());
+    };
+    let mut spans = crate::wire::checked_spans(
+        raw,
+        &plan.format,
+        uint(&entry[0])? as u8,
+        uint(&entry[2]["salt"])? as u32,
+    )?;
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in spans {
+        if let Some(previous) = merged.last_mut().filter(|(_, end)| start <= *end) {
+            previous.1 = previous.1.max(end);
+        } else {
+            merged.push((start, end));
+        }
+    }
+    Ok(merged)
+}
+fn conflicting_literals_with_spans(
+    raw: &[u8],
+    literals: &[Literal],
+    plan: &Plan,
+    checked: &[(usize, usize)],
 ) -> Result<HashSet<usize>> {
     let profile = &plan.meta["input_data_profile"];
     if profile.is_null() {
@@ -1098,124 +1187,240 @@ pub(crate) fn conflicting_literals(
     let mut conflicts = HashSet::new();
     let f = &plan.format;
     let mut budget = 60000usize;
-    let commit = |spans: &[(usize, usize)], conflicts: &mut HashSet<usize>| {
-        for (a, b) in spans {
-            for l in literals
-                .iter()
-                .filter(|l| *a <= l.start && l.start < *b && l.packed.is_none())
-            {
-                conflicts.insert(l.start);
+    let commit =
+        |spans: &[(usize, usize)], branches: &HashSet<usize>, conflicts: &mut HashSet<usize>| {
+            for (a, b) in spans {
+                for l in literals.iter().filter(|l| {
+                    *a <= l.start && l.start < *b && (l.packed.is_none() || branches.contains(a))
+                }) {
+                    conflicts.insert(l.start);
+                }
             }
-        }
-    };
-    if let Some(entry) = profile.get("flow-call") {
-        let opcode = uint(&entry[0])? as u8;
-        let salt = uint(&entry[2]["salt"])? as u32;
-        commit(
-            &crate::wire::checked_spans(raw, f, opcode, salt)?,
-            &mut conflicts,
-        );
-    }
+        };
+    commit(checked, &HashSet::new(), &mut conflicts);
     let by_offset: HashMap<_, _> = literals.iter().map(|l| (l.start, l)).collect();
     for anchor in literals {
         crate::cpu::check()?;
         if !(anchor.start < anchor.end && anchor.end < raw.len()) {
             continue;
         }
-        let mut key = anchor.instruction_key(raw, f);
-        let mut position = anchor.end;
-        let mut spans = Vec::new();
-        for _ in 0..24 {
-            if budget == 0 {
-                return Ok(conflicts);
-            }
-            budget -= 1;
-            if position < anchor.end || position >= raw.len().min(anchor.end + 512) {
-                break;
-            }
-            let at = position;
-            let opcode = f.opcode(raw[position], key, position);
-            key = f.key(key, opcode);
-            if opcode == f.state_step {
-                if !by_offset.contains_key(&position)
-                    || position + plan.kind_slot()? >= raw.len()
-                    || f.byte(raw[position + plan.kind_slot()?], key) != plan.literal_tag()?
+        let mut pending = vec![(
+            anchor.end,
+            anchor.instruction_key(raw, f),
+            Vec::new(),
+            HashSet::new(),
+            0,
+        )];
+        let mut forks = 0;
+        while let Some((mut position, mut key, mut spans, mut branches, depth)) = pending.pop() {
+            for step in depth..24 {
+                if budget == 0 {
+                    return Ok(conflicts);
+                }
+                budget -= 1;
+                if position < anchor.end || position >= raw.len().min(anchor.end + 512) {
+                    break;
+                }
+                let at = position;
+                let opcode = f.opcode(raw[position], key, position);
+                key = f.key(key, opcode);
+                if opcode == f.state_step {
+                    let kind_slot = plan.kind_slot()?;
+                    let tags = &profile["literal-empty"][2]["tags"];
+                    if position + 3 <= raw.len()
+                        && tags.as_array().is_some_and(|tags| {
+                            tags.iter().any(|tag| {
+                                tag.as_u64() == Some(f.byte(raw[position + kind_slot], key) as u64)
+                            })
+                        })
+                    {
+                        position += 3;
+                        spans.push((at, position));
+                        continue;
+                    }
+                    if !by_offset
+                        .get(&position)
+                        .is_some_and(|l| l.instruction_key(raw, f) == key)
+                        || position + plan.kind_slot()? >= raw.len()
+                        || f.byte(raw[position + plan.kind_slot()?], key) != plan.literal_tag()?
+                    {
+                        break;
+                    }
+                    if spans.len() >= 2 {
+                        commit(&spans, &branches, &mut conflicts)
+                    }
+                    break;
+                }
+                let Some((name, entry)) = profile
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .find(|(_, p)| p[0].as_u64() == Some(opcode as u64))
+                else {
+                    break;
+                };
+                let masks = array(&entry[1])?;
+                let roles = &entry[2];
+                match name.as_str() {
+                    "flow-property-pool" => {
+                        if at + uint(&roles["width"])? > raw.len()
+                            || f.byte(raw[at + 1], key) as usize != uint(&roles["marker"])?
+                        {
+                            break;
+                        }
+                        position = at + uint(&roles["width"])?;
+                        spans.push((at, position));
+                    }
+                    "flow-closure" => {
+                        if at + 8 > raw.len() {
+                            break;
+                        }
+                        let count = f.byte(raw[at + 1 + uint(&roles["count"])?], key)
+                            ^ uint(&roles["countMask"])? as u8;
+                        position = at + 8 + count as usize;
+                        if count as usize > uint(&roles["maxCount"])? || position > raw.len() {
+                            break;
+                        }
+                        spans.push((at, position));
+                    }
+                    "flow-branch-fallthrough" => {
+                        if at + 6 > raw.len() {
+                            break;
+                        }
+                        let slots = array(&roles["target"])?;
+                        let target = slots.iter().try_fold(0usize, |v, s| {
+                            Ok::<_, Error>((v << 8) | f.byte(raw[at + 1 + uint(s)?], key) as usize)
+                        })?;
+                        if target < at + 6 || target >= raw.len() {
+                            break;
+                        }
+                        position = at + 6;
+                        spans.push((at, position));
+                        if forks < 24 && target < raw.len().min(anchor.end + 512) {
+                            let next = f.byte(raw[at + 1 + uint(&roles["key"])?], key)
+                                ^ uint(&roles["keyMask"])? as u8;
+                            pending.push((target, next, spans.clone(), branches.clone(), step + 1));
+                            forks += 1;
+                        }
+                    }
+                    "flow-branch" => {
+                        if at + 9 > raw.len() {
+                            break;
+                        }
+                        let flag = f.byte(raw[at + 1 + uint(&roles["flag"])?], key)
+                            ^ uint(&roles["flagMask"])? as u8;
+                        let end = at + if flag == 0 { 9 } else { 13 };
+                        if end > raw.len() {
+                            break;
+                        }
+                        let target_slots = array(&roles["target"])?;
+                        let target = target_slots.iter().try_fold(0usize, |v, slot| {
+                            Ok::<_, Error>(
+                                (v << 8) | f.byte(raw[at + 1 + uint(slot)?], key) as usize,
+                            )
+                        })?;
+                        if target < end || target >= raw.len() {
+                            break;
+                        }
+                        if flag != 0 {
+                            let alternate = array(&roles["alternateTarget"])?;
+                            let alternate = alternate.iter().try_fold(0usize, |v, slot| {
+                                Ok::<_, Error>(
+                                    (v << 8) | f.byte(raw[at + 1 + uint(slot)?], key) as usize,
+                                )
+                            })?;
+                            if alternate < end || alternate >= raw.len() {
+                                break;
+                            }
+                            if forks < 24 && alternate < raw.len().min(anchor.end + 512) {
+                                let next = f.byte(raw[at + 1 + uint(&roles["alternateKey"])?], key)
+                                    ^ uint(&roles["alternateKeyMask"])? as u8;
+                                let mut alternate_spans = spans.clone();
+                                alternate_spans.push((at, end));
+                                let mut alternate_branches = branches.clone();
+                                alternate_branches.insert(at);
+                                pending.push((
+                                    alternate,
+                                    next,
+                                    alternate_spans,
+                                    alternate_branches,
+                                    step + 1,
+                                ));
+                                forks += 1;
+                            }
+                        } else if forks < 24 {
+                            let mut alternate_spans = spans.clone();
+                            alternate_spans.push((at, end));
+                            let mut alternate_branches = branches.clone();
+                            alternate_branches.insert(at);
+                            pending.push((end, key, alternate_spans, alternate_branches, step + 1));
+                            forks += 1;
+                        }
+                        let next = f.byte(raw[at + 1 + uint(&roles["key"])?], key)
+                            ^ uint(&roles["keyMask"])? as u8;
+                        position = target;
+                        spans.push((at, end));
+                        branches.insert(at);
+                        key = next;
+                    }
+                    "flow-jump" => {
+                        if position + 5 > raw.len() {
+                            break;
+                        }
+                        let values: Vec<_> =
+                            (0..4).map(|i| f.byte(raw[position + 1 + i], key)).collect();
+                        let target = ((values[uint(&roles["b16"])?] as usize) << 16)
+                            | ((values[uint(&roles["b8"])?] as usize) << 8)
+                            | values[uint(&roles["b0"])?] as usize;
+                        if target < position + 5 {
+                            break;
+                        }
+                        let next = values[uint(&roles["key"])?] ^ uint(&masks[3])? as u8;
+                        position = target;
+                        spans.push((at, at + 5));
+                        key = next;
+                    }
+                    "flow-varint" | "flow-varint-store" => {
+                        position += 1;
+                        let mut complete = false;
+                        for _ in 0..uint(&roles["maxBytes"])? {
+                            if position >= raw.len() {
+                                break;
+                            }
+                            let v = f.byte(raw[position], key) ^ uint(&masks[0])? as u8;
+                            position += 1;
+                            if v & 128 == 0 {
+                                position += uint(&roles["suffix"])?;
+                                spans.push((at, position));
+                                complete = true;
+                                break;
+                            }
+                        }
+                        if !complete {
+                            break;
+                        }
+                    }
+                    "flow-call" => {
+                        let Some(end) =
+                            framed_end(raw, position, key, opcode, f, uint(&roles["salt"])? as u32)
+                        else {
+                            break;
+                        };
+                        position = end;
+                        spans.push((at, position));
+                        commit(&spans, &branches, &mut conflicts)
+                    }
+                    _ => {
+                        position += 1 + masks.len();
+                        spans.push((at, position));
+                    }
+                }
+                if literals
+                    .iter()
+                    .any(|l| l.packed.is_some() && at <= l.start && l.start < position.min(at + 8))
                 {
                     break;
                 }
-                if spans.len() >= 2 {
-                    commit(&spans, &mut conflicts)
-                }
-                break;
-            }
-            let Some((name, entry)) = profile
-                .as_object()
-                .unwrap()
-                .iter()
-                .find(|(_, p)| p[0].as_u64() == Some(opcode as u64))
-            else {
-                break;
-            };
-            let masks = array(&entry[1])?;
-            let roles = &entry[2];
-            match name.as_str() {
-                "flow-jump" => {
-                    if position + 5 > raw.len() {
-                        break;
-                    }
-                    let values: Vec<_> =
-                        (0..4).map(|i| f.byte(raw[position + 1 + i], key)).collect();
-                    let target = ((values[uint(&roles["b16"])?] as usize) << 16)
-                        | ((values[uint(&roles["b8"])?] as usize) << 8)
-                        | values[uint(&roles["b0"])?] as usize;
-                    if target < position + 5 {
-                        break;
-                    }
-                    let next = values[uint(&roles["key"])?] ^ uint(&masks[3])? as u8;
-                    position = target;
-                    spans.push((at, at + 5));
-                    key = next;
-                }
-                "flow-varint" => {
-                    position += 1;
-                    let mut complete = false;
-                    for _ in 0..uint(&roles["maxBytes"])? {
-                        if position >= raw.len() {
-                            break;
-                        }
-                        let v = f.byte(raw[position], key) ^ uint(&masks[0])? as u8;
-                        position += 1;
-                        if v & 128 == 0 {
-                            position += uint(&roles["suffix"])?;
-                            spans.push((at, position));
-                            complete = true;
-                            break;
-                        }
-                    }
-                    if !complete {
-                        break;
-                    }
-                }
-                "flow-call" => {
-                    let Some(end) =
-                        framed_end(raw, position, key, opcode, f, uint(&roles["salt"])? as u32)
-                    else {
-                        break;
-                    };
-                    position = end;
-                    spans.push((at, position));
-                    commit(&spans, &mut conflicts)
-                }
-                _ => {
-                    position += 1 + masks.len();
-                    spans.push((at, position));
-                }
-            }
-            if literals
-                .iter()
-                .any(|l| l.packed.is_some() && at <= l.start && l.start < position.min(at + 8))
-            {
-                break;
             }
         }
     }

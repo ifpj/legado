@@ -7,6 +7,9 @@ use crate::{
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
+mod boundaries;
+#[cfg(test)]
+mod boundaries_tests;
 #[cfg(test)]
 mod prefix_tests;
 
@@ -162,6 +165,26 @@ pub fn ordered_reads<'a>(
     f: &Format,
     validate: bool,
 ) -> Result<Vec<Node<'a>>> {
+    ordered_reads_impl(t, node, count, f, validate, false)
+}
+// For region widths only: inner cases stay grouped inside their outer case.
+// Their individual execution order is deliberately not inferred here.
+pub(super) fn outer_case_reads<'a>(
+    t: &Tables<'a>,
+    node: Node<'a>,
+    count: usize,
+    f: &Format,
+) -> Result<Vec<Node<'a>>> {
+    ordered_reads_impl(t, node, count, f, false, true)
+}
+fn ordered_reads_impl<'a>(
+    t: &Tables<'a>,
+    node: Node<'a>,
+    count: usize,
+    f: &Format,
+    validate: bool,
+    outer_cases: bool,
+) -> Result<Vec<Node<'a>>> {
     let mut groups = HashMap::<(String, String), Vec<Node<'a>>>::new();
     for read in raw_reads(node) {
         groups
@@ -195,9 +218,20 @@ pub fn ordered_reads<'a>(
             n.kind() == "assignment_expression"
                 && n.child_by_field_name("left")
                     .is_some_and(|l| t.text(l) == variable)
+                || outer_cases
+                    && n.kind() == "variable_declarator"
+                    && n.child_by_field_name("name")
+                        .is_some_and(|l| t.text(l) == variable)
         }) {
             let attempt = (|| -> Result<Vec<Node<'a>>> {
-                let call = unwrap(child(assignment, "right")?);
+                let call = unwrap(child(
+                    assignment,
+                    if assignment.kind() == "variable_declarator" {
+                        "value"
+                    } else {
+                        "right"
+                    },
+                )?);
                 require(call.kind() == "call_expression", "Split call")?;
                 let function = child(call, "function")?;
                 require(
@@ -238,7 +272,11 @@ pub fn ordered_reads<'a>(
                 let mut sorted = Vec::new();
                 for read in &reads {
                     let mut owner = *read;
-                    while !matches!(owner.kind(), "switch_case" | "switch_default") {
+                    while if outer_cases {
+                        !ranks.contains_key(&owner.start_byte())
+                    } else {
+                        !matches!(owner.kind(), "switch_case" | "switch_default")
+                    } {
                         owner = owner
                             .parent()
                             .ok_or_else(|| Error::new("INVALID_DATA", "Control owner"))?;
@@ -341,20 +379,56 @@ pub fn inputs(t: &Tables<'_>, f: &Format) -> Result<Value> {
             ]),
         );
     }
-    if let Ok((handler, opcode)) = handler(t, 16) {
-        if let Ok(reads) = ordered_reads(t, handler, 3, f, true) {
-            let masks: Vec<_> = reads
-                .into_iter()
-                .map(|n| operand(t, n, f).map(|x| x.1))
-                .collect::<Result<_>>()?;
-            if masks[0] == masks[1] {
-                out.insert(
-                    "flow-varint".into(),
-                    json!([opcode,masks,{"suffix":1,"maxBytes":3}]),
-                );
+    for (name, index) in [("flow-varint", 16), ("flow-varint-store", 14)] {
+        if let Ok((handler, opcode)) = handler(t, index) {
+            if let Ok(reads) = ordered_reads(t, handler, 3, f, true) {
+                let masks: Vec<_> = reads
+                    .into_iter()
+                    .map(|n| operand(t, n, f).map(|x| x.1))
+                    .collect::<Result<_>>()?;
+                if masks[0] == masks[1] {
+                    out.insert(name.into(), json!([opcode,masks,{"suffix":1,"maxBytes":3}]));
+                }
             }
         }
     }
+    if let Ok(tags) = boundaries::empty_literals(t, f) {
+        out.insert(
+            "literal-empty".into(),
+            json!([f.state_step,[],{"tags":tags}]),
+        );
+    }
+    if let Ok(profile) = boundaries::branch(t, f) {
+        out.insert("flow-branch".into(), profile);
+    }
+    if let Ok(profile) = boundaries::jump(t, f) {
+        out.insert("flow-jump".into(), profile);
+    }
+    if let Ok(profile) = boundaries::fallthrough(t, f) {
+        out.insert("flow-branch-fallthrough".into(), profile);
+    }
+    if let Ok(profile) = boundaries::fixed_apply(t, f) {
+        out.insert("flow-apply".into(), profile);
+    }
+    if let Ok(profile) = boundaries::fixed(t, f, 40, 4) {
+        out.insert("flow-write".into(), profile);
+    }
+    if let Ok(profile) = boundaries::function_reference(t, f) {
+        out.insert("flow-reference".into(), profile);
+    }
+    if let Ok(profile) = boundaries::closure(t, f) {
+        out.insert("flow-closure".into(), profile);
+    }
+    if let Ok(profile) = boundaries::property_pool(t, f) {
+        out.insert("flow-property-pool".into(), profile);
+    }
+    if let Ok(profiles) = boundaries::shared_binary(t, f) {
+        out.extend(profiles);
+    }
+    if let Ok(profiles) = boundaries::shared_unary(t, f) {
+        out.extend(profiles);
+    }
+    crate::cpu::check()?;
     Ok(json!(out))
 }
 pub fn immediate(t: &Tables<'_>, f: &Format) -> Result<Value> {
