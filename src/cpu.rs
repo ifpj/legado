@@ -383,4 +383,34 @@ mod tests {
         assert!(!stopped());
         assert!(check().is_ok());
     }
+    #[tokio::test]
+    async fn configuration_parsers_cancel_without_blocking_async_requests() {
+        for parser in 0..3 {
+            let pool = Arc::new(Pool::new(1));
+            let source = "var a=1;".repeat(500_000) + ";window._cf_chl_opt={value:42}";
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let p = pool.clone();
+            let request = tokio::spawn(async move {
+                p.run(deadline(), move || {
+                    let _ = started.send(());
+                    match parser {
+                        0 => crate::static_data::assignment(&source, "_cf_chl_opt"),
+                        1 => crate::static_data::object_data(&source, "_cf_chl_opt"),
+                        _ => crate::jsd::inspect(&source).map(Some),
+                    }
+                })
+                .await
+            });
+            ready.await.unwrap();
+            // This timer runs on a single async worker while parsing continues.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert!(!request.is_finished());
+            request.abort();
+            let _ = request.await;
+            tokio::time::timeout(Duration::from_secs(1), pool.run(deadline(), || Ok(())))
+                .await
+                .expect("configuration parser must release the CPU slot after cancellation")
+                .unwrap();
+        }
+    }
 }

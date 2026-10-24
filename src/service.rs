@@ -2,7 +2,7 @@ use crate::{
     engine::Engine,
     epoch_ms,
     network::{ConnectTo, Dns, NetworkConfig, RequestContext, Session, USER_AGENT},
-    static_data::{origin, recognize, validate_url},
+    static_data::{origin, validate_url},
     Error, Result,
 };
 use serde_json::{json, Value};
@@ -276,12 +276,7 @@ impl Service {
                     let generation = session.generation.load(Ordering::Acquire);
                     active.record["stage"] = json!("fetchingUpstream");
                     let response = crate::engine::target(&session, url, deadline).await?;
-                    let challenge = recognize(
-                        &response.url,
-                        response.status,
-                        &response.headers,
-                        &response.text,
-                    )?;
+                    let challenge = crate::engine::recognize(&response, deadline).await?;
                     if !matches!(
                         challenge.kind.as_str(),
                         "managed" | "blocked" | "jsd" | "embedded-turnstile"

@@ -7,9 +7,86 @@ use html5ever::{
     },
 };
 use serde_json::{json, Value};
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{Arc, Mutex, OnceLock},
+};
 
-#[derive(Clone, Default)]
+/// Immutable response text and its analysis. Clones share only this response;
+/// a subsequent HTTP response always constructs a new document.
+#[derive(Clone, Debug)]
+pub struct Document(Arc<DocumentData>);
+#[derive(Debug)]
+struct DocumentData {
+    source: String,
+    facts: OnceLock<Facts>,
+    analyzing: Mutex<()>,
+}
+impl From<String> for Document {
+    fn from(source: String) -> Self {
+        Self(Arc::new(DocumentData {
+            source,
+            facts: OnceLock::new(),
+            analyzing: Mutex::new(()),
+        }))
+    }
+}
+impl From<&str> for Document {
+    fn from(source: &str) -> Self {
+        source.to_owned().into()
+    }
+}
+impl std::ops::Deref for Document {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0.source
+    }
+}
+impl AsRef<str> for Document {
+    fn as_ref(&self) -> &str {
+        self
+    }
+}
+impl serde::Serialize for Document {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self)
+    }
+}
+impl Document {
+    pub fn facts(&self) -> Result<&Facts> {
+        crate::cpu::check()?;
+        if let Some(facts) = self.0.facts.get() {
+            return Ok(facts);
+        }
+        let _guard = loop {
+            crate::cpu::check()?;
+            match self.0.analyzing.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5))
+                }
+                Err(_) => {
+                    return Err(crate::Error::new(
+                        "INVALID_DATA",
+                        "HTML analysis lock poisoned",
+                    ))
+                }
+            }
+        };
+        if self.0.facts.get().is_none() {
+            let facts = Facts::read(self)?;
+            crate::cpu::check()?;
+            let _ = self.0.facts.set(facts);
+        }
+        Ok(self.0.facts.get().unwrap())
+    }
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct Facts {
     pub title: String,
     pub prefix: String,
@@ -150,6 +227,7 @@ impl TokenSink for Sink {
 }
 impl Facts {
     pub fn read(html: &str) -> Result<Self> {
+        crate::cpu::check()?;
         require(html.len() <= 8 * 1024 * 1024, "HTML analysis limit")?;
         let facts = Rc::new(RefCell::new(Self::default()));
         let input = BufferQueue::default();
@@ -157,7 +235,11 @@ impl Facts {
         let tok = Tokenizer::new(Sink(facts.clone()), TokenizerOpts::default());
         let _ = tok.feed(&input);
         tok.end();
-        let value = facts.borrow().clone();
+        drop(tok);
+        crate::cpu::check()?;
+        let value = Rc::try_unwrap(facts)
+            .expect("Tokenizer released its sink")
+            .into_inner();
         require(
             value.elements <= 100000 && value.tags.len() <= 128,
             "HTML structure limit",
@@ -176,4 +258,59 @@ pub fn title_fingerprint(text: &str) -> String {
         hash = hash.wrapping_mul(33) ^ unit as u32;
     }
     format!("{count}|{hash}")
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn concurrent_consumers_share_facts_only_within_the_same_response() {
+        let script = "/*中文😀*/let x='value';".repeat(10_000);
+        let text = format!("<html><head><title>本轮</title><style>.test{{color:red}}</style><script>{script}</script></head><body data-new>正文</body></html>");
+        let document = Document::from(text.clone());
+        let start = std::sync::Barrier::new(6);
+        let pointers = std::thread::scope(|s| {
+            let jobs: Vec<_> = (0..6)
+                .map(|_| {
+                    let cloned = document.clone();
+                    let start = &start;
+                    s.spawn(move || {
+                        start.wait();
+                        cloned.facts().unwrap() as *const Facts as usize
+                    })
+                })
+                .collect();
+            jobs.into_iter()
+                .map(|j| j.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(pointers.iter().all(|p| *p == pointers[0]));
+        assert_eq!(document.facts().unwrap().script_texts, [script]);
+        assert_eq!(
+            document.facts().unwrap().fields("same-url"),
+            Facts::read(&text).unwrap().fields("same-url")
+        );
+        assert_eq!(serde_json::to_value(&document).unwrap(), text);
+        let next = Document::from("<title>下一轮</title><script>fresh()</script>");
+        assert_eq!(next.facts().unwrap().title, "下一轮");
+        assert_eq!(document.facts().unwrap().title, "本轮");
+        assert!(!std::ptr::eq(
+            document.facts().unwrap(),
+            next.facts().unwrap()
+        ));
+    }
+    #[tokio::test]
+    async fn cancelled_analysis_waiter_does_not_poison_document() {
+        let document = Document::from("<title>fresh</title>");
+        let guard = document.0.analyzing.lock().unwrap();
+        let cloned = document.clone();
+        let error = crate::cpu::run(
+            std::time::Instant::now() + std::time::Duration::from_millis(20),
+            move || cloned.facts().map(|_| ()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "TIMEOUT");
+        drop(guard);
+        assert_eq!(document.facts().unwrap().title, "fresh");
+    }
 }

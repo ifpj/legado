@@ -277,7 +277,7 @@ impl Session {
             url: final_url,
             headers,
             content,
-            text,
+            text: text.into(),
             download_size,
         })
     }
@@ -367,7 +367,7 @@ pub struct HttpResponse {
     pub url: String,
     pub headers: Map<String, Value>,
     pub content: Vec<u8>,
-    pub text: String,
+    pub text: crate::html::Document,
     pub download_size: usize,
 }
 pub(crate) fn response_encoding(

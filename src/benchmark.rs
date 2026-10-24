@@ -6,9 +6,68 @@ use crate::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
-use std::{collections::HashSet, time::Instant};
+use std::{
+    collections::HashSet,
+    sync::{Mutex, OnceLock},
+    time::Instant,
+};
 fn failure(e: impl std::fmt::Display) -> Error {
     Error::new("BENCHMARK_ERROR", e.to_string())
+}
+struct Compiled {
+    engine: wasmtime::Engine,
+    module: wasmtime::Module,
+}
+#[derive(Default)]
+struct ModuleCache {
+    compiled: OnceLock<Compiled>,
+    compiling: Mutex<()>,
+}
+impl ModuleCache {
+    fn get(&self, code: &[u8]) -> Result<&Compiled> {
+        // Validate every caller, even when the single supported module is cached.
+        require(
+            code.len() <= 16384
+                && sha(code) == "25c4ff7eb859a44b7e8734f710e43901dea7a720462cea79671d4bd356bdff60",
+            "Unknown arithmetic module",
+        )?;
+        crate::cpu::check()?;
+        if let Some(compiled) = self.compiled.get() {
+            return Ok(compiled);
+        }
+        let _guard = loop {
+            crate::cpu::check()?;
+            match self.compiling.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5))
+                }
+                Err(_) => return Err(failure("Arithmetic compiler lock poisoned")),
+            }
+        };
+        if let Some(compiled) = self.compiled.get() {
+            return Ok(compiled);
+        }
+        let mut config = wasmtime::Config::new();
+        config
+            .consume_fuel(true)
+            .wasm_simd(true)
+            .epoch_interruption(true);
+        let engine = wasmtime::Engine::new(&config).map_err(failure)?;
+        let module = wasmtime::Module::new(&engine, code).map_err(failure)?;
+        require(
+            module.imports().next().is_none()
+                && module
+                    .exports()
+                    .map(|e| e.name().to_string())
+                    .collect::<HashSet<_>>()
+                    == HashSet::from(["memory", "a", "b", "c", "d"].map(String::from)),
+            "Arithmetic host interfaces forbidden",
+        )?;
+        crate::cpu::check()?;
+        let _ = self.compiled.set(Compiled { engine, module });
+        Ok(self.compiled.get().unwrap())
+    }
 }
 struct EpochTicker(Option<tokio::task::JoinHandle<()>>);
 impl Drop for EpochTicker {
@@ -25,11 +84,6 @@ pub fn run(
     repeats: u32,
     warmup: i32,
 ) -> Result<Value> {
-    require(
-        code.len() <= 16384
-            && sha(code) == "25c4ff7eb859a44b7e8734f710e43901dea7a720462cea79671d4bd356bdff60",
-        "Unknown arithmetic module",
-    )?;
     let mut sorted = order;
     sorted.sort();
     require(
@@ -40,47 +94,11 @@ pub fn run(
         "Arithmetic limits",
     )?;
     let started = Instant::now();
-    let mut config = wasmtime::Config::new();
-    crate::cpu::check()?;
-    config
-        .consume_fuel(true)
-        .wasm_simd(true)
-        .epoch_interruption(true);
-    let engine = wasmtime::Engine::new(&config).map_err(failure)?;
-    let module = wasmtime::Module::new(&engine, code).map_err(failure)?;
-    require(
-        module.imports().next().is_none()
-            && module
-                .exports()
-                .map(|e| e.name().to_string())
-                .collect::<HashSet<_>>()
-                == HashSet::from(["memory", "a", "b", "c", "d"].map(String::from)),
-        "Arithmetic host interfaces forbidden",
-    )?;
-    let limits = wasmtime::StoreLimitsBuilder::new()
-        .memory_size(1024 * 1024)
-        .instances(1)
-        .tables(0)
-        .memories(1)
-        .build();
-    let mut store = wasmtime::Store::new(&engine, limits);
-    let _ticker = EpochTicker(tokio::runtime::Handle::try_current().ok().map(|runtime| {
-        let engine = engine.clone();
-        runtime.spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                engine.increment_epoch();
-            }
-        })
-    }));
-    store.set_epoch_deadline(1);
-    store.epoch_deadline_callback(|_| {
-        crate::cpu::check().map_err(|error| wasmtime::Error::msg(error.to_string()))?;
-        Ok(wasmtime::UpdateDeadline::Continue(1))
-    });
-    store.limiter(|limits| limits);
-    store.set_fuel(2_000_000_000).map_err(failure)?;
-    let instance = wasmtime::Instance::new(&mut store, &module, &[]).map_err(failure)?;
+    static CACHE: ModuleCache = ModuleCache {
+        compiled: OnceLock::new(),
+        compiling: Mutex::new(()),
+    };
+    let (mut store, instance, _ticker) = instantiate(CACHE.get(code)?)?;
     let compiled = started.elapsed().as_secs_f64() * 1000.;
     let mut samples: Vec<Vec<f64>> = vec![vec![]; 4];
     let timed = Instant::now();
@@ -117,6 +135,113 @@ pub fn run(
     Ok(
         json!({"jpZy6":order,"QaoMZ6":counts,"Czvlo8":true,"BvSgL3":samples,"kFiz5":compiled,"YHqsV6":timed.elapsed().as_secs_f64()*1000.}),
     )
+}
+fn instantiate(
+    compiled: &Compiled,
+) -> Result<(
+    wasmtime::Store<wasmtime::StoreLimits>,
+    wasmtime::Instance,
+    EpochTicker,
+)> {
+    let Compiled { engine, module } = compiled;
+    let limits = wasmtime::StoreLimitsBuilder::new()
+        .memory_size(1024 * 1024)
+        .instances(1)
+        .tables(0)
+        .memories(1)
+        .build();
+    let mut store = wasmtime::Store::new(engine, limits);
+    let ticker = EpochTicker(tokio::runtime::Handle::try_current().ok().map(|runtime| {
+        let engine = engine.clone();
+        runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                engine.increment_epoch();
+            }
+        })
+    }));
+    store.set_epoch_deadline(1);
+    store.epoch_deadline_callback(|_| {
+        crate::cpu::check().map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+        Ok(wasmtime::UpdateDeadline::Continue(1))
+    });
+    store.limiter(|limits| limits);
+    store.set_fuel(2_000_000_000).map_err(failure)?;
+    let instance = wasmtime::Instance::new(&mut store, module, &[]).map_err(failure)?;
+    Ok((store, instance, ticker))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    fn code() -> Vec<u8> {
+        let mut source = String::new();
+        flate2::read::GzDecoder::new(
+            &include_bytes!("../tests/fixtures/python-contracts.json.gz")[..],
+        )
+        .read_to_string(&mut source)
+        .unwrap();
+        re(r"AGFzbQ[A-Za-z0-9+/=]{100,22000}")
+            .find_iter(&source)
+            .filter_map(|m| STANDARD.decode(m.as_str()).ok())
+            .find(|code| {
+                sha(code) == "25c4ff7eb859a44b7e8734f710e43901dea7a720462cea79671d4bd356bdff60"
+            })
+            .unwrap()
+    }
+    #[test]
+    fn simultaneous_compilation_reuses_one_module_and_revalidates_input() {
+        let cache = ModuleCache::default();
+        let code = code();
+        let start = std::sync::Barrier::new(6);
+        let modules = std::thread::scope(|s| {
+            let jobs: Vec<_> = (0..6)
+                .map(|_| {
+                    s.spawn(|| {
+                        start.wait();
+                        cache.get(&code).unwrap() as *const Compiled as usize
+                    })
+                })
+                .collect();
+            jobs.into_iter()
+                .map(|job| job.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(modules.iter().all(|p| *p == modules[0]));
+        let mut changed = code.clone();
+        changed[100] ^= 1;
+        assert!(cache.get(&changed).is_err());
+        assert!(cache.get(&code).is_ok());
+    }
+    #[test]
+    fn reused_module_keeps_memory_fuel_and_limits_per_execution() {
+        let cache = ModuleCache::default();
+        let code = code();
+        let compiled = cache.get(&code).unwrap();
+        let (mut first, a, _a_tick) = instantiate(compiled).unwrap();
+        let (mut second, b, _b_tick) = instantiate(compiled).unwrap();
+        let a_memory = a.get_memory(&mut first, "memory").unwrap();
+        let b_memory = b.get_memory(&mut second, "memory").unwrap();
+        let original = b_memory.data(&second)[0];
+        a_memory.write(&mut first, 0, &[original ^ 0xff]).unwrap();
+        assert_eq!(b_memory.data(&second)[0], original);
+        first.set_fuel(0).unwrap();
+        let mut output = [wasmtime::Val::I32(0)];
+        assert!(a
+            .get_func(&mut first, "a")
+            .unwrap()
+            .call(&mut first, &[wasmtime::Val::I32(1)], &mut output)
+            .is_err());
+        b.get_func(&mut second, "a")
+            .unwrap()
+            .call(&mut second, &[wasmtime::Val::I32(1)], &mut output)
+            .unwrap();
+        assert!(b_memory.grow(&mut second, 17).is_err());
+        assert_eq!(
+            run(&code, [3, 2, 1, 0], [2, 3, 4, 5], 1, 1).unwrap()["QaoMZ6"],
+            json!([2, 3, 4, 5])
+        );
+    }
 }
 pub fn calculate(c: &Context<'_>, results: &mut Results) -> Result<()> {
     for m in &c.catalog.modules {

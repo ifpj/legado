@@ -55,6 +55,13 @@ pub fn search_form(url: &str) -> Result<Option<Vec<u8>>> {
 }
 
 pub fn recognize(url: &str, html: &str) -> Result<Option<Widget>> {
+    recognize_document(url, &html.into())
+}
+pub(crate) fn recognize_document(
+    url: &str,
+    html: &crate::html::Document,
+) -> Result<Option<Widget>> {
+    crate::cpu::check()?;
     let page = static_data::validate_url(url)?;
     if page.scheme() != "https"
         || page.host_str() != Some("www.69shuba.com")
@@ -92,14 +99,13 @@ pub fn recognize(url: &str, html: &str) -> Result<Option<Widget>> {
         .set_language(&tree_sitter_javascript::LANGUAGE.into())
         .unwrap();
     let mut keys = Vec::new();
-    for script in crate::html::Facts::read(html)?.script_texts {
+    for script in &html.facts()?.script_texts {
         if !script.contains("turnstile.render") {
             continue;
         }
-        let tree = parser
-            .parse(&script, None)
-            .ok_or_else(|| Error::new("INVALID_DATA", "Widget syntax"))?;
+        let tree = crate::cpu::parse(&mut parser, script)?;
         for node in crate::constants::walk(tree.root_node(), true) {
+            crate::cpu::check()?;
             if node.kind() != "call_expression" {
                 continue;
             }

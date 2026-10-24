@@ -123,7 +123,7 @@ fn response(v: &Value, raw: Vec<u8>) -> Result<data::Response> {
             strings,
         },
         raw,
-        literals,
+        literals: literals.into(),
         packed,
     })
 }
@@ -177,8 +177,12 @@ fn model_call(op: &str, a: &[Value], k: &Value) -> Result<Value> {
         response: &r,
         plan: &p,
         catalog: &c,
-        html: a.get(offset + 3).and_then(Value::as_str).unwrap_or(""),
-        parent_html: k["page_html"].as_str().unwrap_or(""),
+        html: &a
+            .get(offset + 3)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .into(),
+        parent_html: &k["page_html"].as_str().unwrap_or("").into(),
         frame_url: "https://challenges.cloudflare.com/frame",
         page_url: "https://example.org/",
         mode: "managed",
@@ -346,8 +350,8 @@ fn invoke(op: &str, a: &[Value], k: &Value) -> Result<Value> {
                 response: &r,
                 plan: &p,
                 catalog: &c,
-                html: "",
-                parent_html: "",
+                html: &"".into(),
+                parent_html: &"".into(),
                 frame_url: "https://challenges.cloudflare.com/frame",
                 page_url: "https://example.org/",
                 mode: "managed",
@@ -431,8 +435,8 @@ fn invoke(op: &str, a: &[Value], k: &Value) -> Result<Value> {
                 response: &r,
                 catalog: &c,
                 plan: &p,
-                html: "",
-                parent_html: "",
+                html: &"".into(),
+                parent_html: &"".into(),
                 frame_url: "https://challenges.cloudflare.com/frame",
                 page_url: "https://example.org/",
                 mode: "managed",
@@ -508,8 +512,8 @@ fn invoke(op: &str, a: &[Value], k: &Value) -> Result<Value> {
                 response: &r,
                 plan: &p,
                 catalog: &c,
-                html: "",
-                parent_html: "",
+                html: &"".into(),
+                parent_html: &"".into(),
                 frame_url: "https://challenges.cloudflare.com/frame",
                 page_url: "https://example.org/",
                 mode: "managed",

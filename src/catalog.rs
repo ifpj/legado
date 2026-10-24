@@ -116,7 +116,7 @@ mod tests {
                 code_length: 6000,
                 strings: vec![],
             },
-            literals: vec![],
+            literals: vec![].into(),
             packed: vec![],
         };
         for i in 0..34 {

@@ -24,8 +24,8 @@ pub struct Context<'a> {
     pub response: &'a Response,
     pub plan: &'a Plan,
     pub catalog: &'a Catalog,
-    pub html: &'a str,
-    pub parent_html: &'a str,
+    pub html: &'a crate::html::Document,
+    pub parent_html: &'a crate::html::Document,
     pub frame_url: &'a str,
     pub page_url: &'a str,
     pub mode: &'a str,
@@ -48,8 +48,8 @@ pub fn calculate(context: &Context<'_>) -> Result<Results> {
     let plan = context.plan;
     let mut results = Results::default();
     crate::identity::Identity::transport().calculate(r, context.catalog, &mut results)?;
-    let document = Facts::read(context.html)?;
-    let parent = Facts::read(context.parent_html)?;
+    let document = context.html.facts()?;
+    let parent = context.parent_html.facts()?;
     let allowed: HashSet<_> = [
         "KOmHB7", "ZLSD0", "YGZZe2", "aymS3", "SgRiW9", "sJvX2", "NjCPO1", "tikJ6", "ipjt9",
         "ORNm0", "PdJpg6", "QlZv9", "YqDCY7", "HTIj5",
@@ -669,8 +669,8 @@ mod task_ownership_regression {
             response: &response,
             plan: &plan,
             catalog: &catalog,
-            html: "",
-            parent_html: "",
+            html: &"".into(),
+            parent_html: &"".into(),
             frame_url: "https://challenges.cloudflare.com/",
             page_url: "https://twkan.com/txt/1/1",
             mode: "managed",

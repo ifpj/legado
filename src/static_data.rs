@@ -16,7 +16,12 @@ pub fn unquote(source: &str) -> Result<String> {
         .chars()
         .peekable();
     let mut result = Vec::<u16>::new();
+    let mut scanned = 0usize;
     while let Some(c) = chars.next() {
+        scanned += 1;
+        if scanned % 1024 == 0 {
+            crate::cpu::check()?;
+        }
         require(
             !(quote == '`' && c == '$' && chars.peek() == Some(&'{')),
             "Template interpolation is not data",
@@ -61,6 +66,7 @@ pub fn unquote(source: &str) -> Result<String> {
         .map_err(|_| Error::new("INVALID_DATA", "Unpaired configuration string"))
 }
 fn literal(node: Node<'_>, source: &str, depth: usize) -> Result<Value> {
+    crate::cpu::check()?;
     require(depth <= 32, "Configuration depth")?;
     let text = &source[node.byte_range()];
     Ok(match node.kind() {
@@ -140,31 +146,23 @@ fn literal(node: Node<'_>, source: &str, depth: usize) -> Result<Value> {
     })
 }
 pub fn assignment(source: &str, name: &str) -> Result<Option<Value>> {
+    crate::cpu::check()?;
     require(source.len() <= 8 * 1024 * 1024, "Script limit")?;
     if !source.contains(name) {
         return Ok(None);
     }
     if source.trim_start().starts_with('<') {
-        let scripts = crate::html::Facts::read(source)?.script_texts;
-        let mut values = Vec::new();
-        for script in scripts {
-            if let Some(value) = assignment(&script, name)? {
-                values.push(value);
-            }
-        }
-        require(values.len() <= 1, "Ambiguous HTML configuration")?;
-        return Ok(values.pop());
+        return assignment_document(&source.into(), name);
     }
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_javascript::LANGUAGE.into())
         .map_err(|e| Error::new("PARSER_ERROR", e.to_string()))?;
-    let tree = parser
-        .parse(source, None)
-        .ok_or_else(|| Error::new("PARSER_ERROR", "Cannot parse configuration"))?;
+    let tree = crate::cpu::parse(&mut parser, source)?;
     let mut pending = vec![tree.root_node()];
     let mut matches = Vec::new();
     while let Some(node) = pending.pop() {
+        crate::cpu::check()?;
         if node.kind() == "assignment_expression" {
             if let (Some(left), Some(right)) = (
                 node.child_by_field_name("left"),
@@ -196,6 +194,27 @@ pub fn assignment(source: &str, name: &str) -> Result<Option<Value>> {
     require(matches.len() <= 1, "Ambiguous configuration assignment")?;
     Ok(matches.pop())
 }
+pub(crate) fn assignment_document(
+    source: &crate::html::Document,
+    name: &str,
+) -> Result<Option<Value>> {
+    crate::cpu::check()?;
+    require(source.len() <= 8 * 1024 * 1024, "Script limit")?;
+    if !source.contains(name) {
+        return Ok(None);
+    }
+    if !source.trim_start().starts_with('<') {
+        return assignment(source, name);
+    }
+    let mut values = Vec::new();
+    for script in &source.facts()?.script_texts {
+        if let Some(value) = assignment(script, name)? {
+            values.push(value);
+        }
+    }
+    require(values.len() <= 1, "Ambiguous HTML configuration")?;
+    Ok(values.pop())
+}
 
 pub fn origin(url: &str) -> Result<String> {
     let u = validate_url(url)?;
@@ -208,31 +227,35 @@ pub fn literal_data(source: &str) -> Result<Value> {
     parser
         .set_language(&tree_sitter_javascript::LANGUAGE.into())
         .unwrap();
-    let tree = parser
-        .parse(&wrapped, None)
-        .ok_or_else(|| Error::new("INVALID_DATA", "Literal parse"))?;
+    let tree = crate::cpu::parse(&mut parser, &wrapped)?;
     require(!tree.root_node().has_error(), "Invalid data literal syntax")?;
-    require(
-        !crate::constants::walk(tree.root_node(), true)
-            .iter()
-            .any(|n| {
-                matches!(
-                    n.kind(),
-                    "call_expression"
-                        | "function_expression"
-                        | "function_declaration"
-                        | "arrow_function"
-                        | "method_definition"
-                )
-            }),
-        "Executable values are not literal data",
-    )?;
+    data_members_only(tree.root_node())?;
     let node = tree
         .root_node()
         .named_child(0)
         .and_then(|n| n.named_child(0))
         .ok_or_else(|| Error::new("INVALID_DATA", "Literal absent"))?;
     literal(crate::constants::unwrap(node), &wrapped, 0)
+}
+fn data_members_only(node: Node<'_>) -> Result<()> {
+    let mut pending = vec![node];
+    while let Some(node) = pending.pop() {
+        crate::cpu::check()?;
+        require(
+            !matches!(
+                node.kind(),
+                "call_expression"
+                    | "function_expression"
+                    | "function_declaration"
+                    | "arrow_function"
+                    | "method_definition"
+            ),
+            "Executable values are not literal data",
+        )?;
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor));
+    }
+    Ok(())
 }
 /// Read only data members of a configuration object; executable values remain
 /// inert and are omitted. Duplicate objects/keys remain errors.
@@ -242,14 +265,16 @@ pub(crate) fn object_data(source: &str, name: &str) -> Result<Option<Value>> {
     parser
         .set_language(&tree_sitter_javascript::LANGUAGE.into())
         .unwrap();
-    let tree = parser
-        .parse(source, None)
-        .ok_or_else(|| Error::new("INVALID_DATA", "Object parse"))?;
+    let tree = crate::cpu::parse(&mut parser, source)?;
     let mut found = Vec::new();
-    for node in crate::constants::walk(tree.root_node(), true)
-        .into_iter()
-        .filter(|n| n.kind() == "assignment_expression")
-    {
+    let mut pending = vec![tree.root_node()];
+    while let Some(node) = pending.pop() {
+        crate::cpu::check()?;
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor));
+        if node.kind() != "assignment_expression" {
+            continue;
+        }
         let left = crate::constants::child(node, "left")?;
         let target = &source[left.byte_range()];
         if target != name && target != format!("window.{name}") {
@@ -260,6 +285,7 @@ pub(crate) fn object_data(source: &str, name: &str) -> Result<Option<Value>> {
         let mut out = serde_json::Map::new();
         let mut seen = std::collections::HashSet::new();
         for pair in crate::constants::children(object) {
+            crate::cpu::check()?;
             if pair.kind() == "comment" {
                 continue;
             }
@@ -271,9 +297,18 @@ pub(crate) fn object_data(source: &str, name: &str) -> Result<Option<Value>> {
                 unquote(&source[key.byte_range()])?
             };
             require(seen.insert(key.clone()), "Duplicate configuration field")?;
-            if let Ok(value) =
-                literal_data(&source[crate::constants::child(pair, "value")?.byte_range()])
-            {
+            let member = crate::constants::child(pair, "value")?;
+            let value = (|| {
+                require(
+                    member.end_byte() - member.start_byte() <= 1024 * 1024,
+                    "Literal input bounds",
+                )?;
+                require(!member.has_error(), "Invalid data literal syntax")?;
+                data_members_only(member)?;
+                literal(crate::constants::unwrap(member), source, 0)
+            })();
+            crate::cpu::check()?;
+            if let Ok(value) = value {
                 out.insert(key, value);
             }
         }
@@ -281,6 +316,34 @@ pub(crate) fn object_data(source: &str, name: &str) -> Result<Option<Value>> {
     }
     require(found.len() <= 1, "Ambiguous configuration object")?;
     Ok(found.pop())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn object_members_reuse_syntax_without_relaxing_data_only_validation() {
+        for member in [
+            "{key:'中文',items:[1,-2,null,true]}",
+            "(`escaped\\ntext`)",
+            "({x:0x1f})",
+            "btoa(String(123))",
+            "{callback:()=>1}",
+            "{nested:{callback:function(){}}}",
+            "{x:call()}",
+            "{method(){}}",
+            "{duplicate:1,duplicate:2}",
+        ] {
+            let source = format!("window._cf_chl_opt={{value:{member},keep:42}};");
+            let parsed = object_data(&source, "_cf_chl_opt").unwrap().unwrap();
+            assert_eq!(parsed["keep"], 42);
+            match literal_data(member) {
+                Ok(expected) => assert_eq!(parsed["value"], expected, "{member}"),
+                Err(_) => assert!(parsed.get("value").is_none(), "{member}"),
+            }
+        }
+        assert!(object_data("_cf_chl_opt={x:()=>1,x:2}", "_cf_chl_opt").is_err());
+        assert!(object_data("_cf_chl_opt={};window._cf_chl_opt={}", "_cf_chl_opt").is_err());
+    }
 }
 pub fn validate_url(url: &str) -> Result<url::Url> {
     let invalid = || {
@@ -322,6 +385,15 @@ pub fn recognize(
     headers: &serde_json::Map<String, Value>,
     html: &str,
 ) -> Result<Challenge> {
+    recognize_document(url, status, headers, &html.into())
+}
+pub(crate) fn recognize_document(
+    url: &str,
+    status: u16,
+    headers: &serde_json::Map<String, Value>,
+    html: &crate::html::Document,
+) -> Result<Challenge> {
+    crate::cpu::check()?;
     let content = headers
         .get("content-type")
         .and_then(Value::as_str)
@@ -339,10 +411,11 @@ pub fn recognize(
         return Ok(empty());
     }
     let mitigated = headers.get("cf-mitigated").and_then(Value::as_str) == Some("challenge");
-    let config = match assignment(html, "_cf_chl_opt") {
+    let config = match assignment_document(html, "_cf_chl_opt") {
         Ok(Some(v)) => v,
         Ok(None) => json!({}),
         Err(e) => {
+            crate::cpu::check()?;
             if mitigated {
                 return Err(e);
             }
@@ -374,14 +447,14 @@ pub fn recognize(
             script,
         });
     }
-    if let Some(widget) = crate::embedded::recognize(url, html)? {
+    if let Some(widget) = crate::embedded::recognize_document(url, html)? {
         return Ok(Challenge {
             kind: "embedded-turnstile".into(),
             config: json!({"sitekey":widget.sitekey,"adapter":"69shuba-search"}),
             script: Some(widget.api_url),
         });
     }
-    if let Some(config) = assignment(html, "__CF$cv$params")? {
+    if let Some(config) = assignment_document(html, "__CF$cv$params")? {
         if config.get("r").is_some() && config.get("t").is_some() {
             let doc = scraper::Html::parse_document(html);
             let title_selector = scraper::Selector::parse("title").unwrap();

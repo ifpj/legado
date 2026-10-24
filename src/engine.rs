@@ -5,7 +5,7 @@ use crate::{
     completion::{self, Navigation},
     data::{Plan, Response},
     epoch_ms,
-    html::Facts,
+    html::Document,
     models::{self, Context, Results},
     network::{HttpResponse, Session},
     re, require,
@@ -56,8 +56,23 @@ fn protocol_error(code: &str, message: &str, status: u16, details: Value) -> Err
 pub fn initial(config: &Value, locale: &str) -> Value {
     json!({"TawNq4":config["cType"],"QZAb2":config["cvId"],"UqwKl5":0,"gRYZ0":0,"Pzgs5":"OoGu5","URVD0":0,"shUar7":0,"ghqno0":0,"pKaqh3":1,"RUtA1":config["cITimeS"],"MsSIK5":config["md"],"YVDgD5":config["cTplC"]==1,"nTlR0":{"frLR7":0,"WxIBU1":0,"rRfi2":0,"XWXu1":0,"Mfpwg0":0,"GCgUo2":0,"GkCb5":0,"gmGY7":0},"CtUv5":false,"TKcX8":false,"iWlWL9":"iDQN3","CAHKN0":"","vvfHL3":"[]","bkOl5":0,"gfOgY8":"tQth1","Bxtcq6":locale,"lffN9":"qCZq4","BuWQ0":{"LQfqz0":"chejv1"}})
 }
-async fn plan(source: String, frame: bool, deadline: Instant) -> Result<Plan> {
+async fn plan(source: Document, frame: bool, deadline: Instant) -> Result<Plan> {
     crate::cpu::run(deadline, move || Plan::analyze(&source, frame)).await
+}
+pub(crate) async fn recognize(
+    response: &HttpResponse,
+    deadline: Instant,
+) -> Result<static_data::Challenge> {
+    let (url, status, headers, text) = (
+        response.url.clone(),
+        response.status,
+        response.headers.clone(),
+        response.text.clone(),
+    );
+    crate::cpu::run(deadline, move || {
+        static_data::recognize_document(&url, status, &headers, &text)
+    })
+    .await
 }
 
 pub(crate) async fn target(s: &Session, url: &str, deadline: Instant) -> Result<HttpResponse> {
@@ -166,12 +181,7 @@ impl Engine {
         let mut details_list: Vec<Value> = Vec::new();
         let mut solved = false;
         for _ in 0..4 {
-            let challenge = static_data::recognize(
-                &current.url,
-                current.status,
-                &current.headers,
-                &current.text,
-            )?;
+            let challenge = recognize(&current, deadline).await?;
             let identity = format!(
                 "{}|{}",
                 origin(&current.url)?,
@@ -197,16 +207,19 @@ impl Engine {
                         solved: false,
                     });
                 }
-                let widget =
-                    crate::embedded::recognize(&current.url, &current.text)?.ok_or_else(|| {
-                        Error::new("EMBEDDED_FORMAT_UNSUPPORTED", "嵌入式验证声明发生变化")
-                    })?;
+                let (widget_url, widget_text) = (current.url.clone(), current.text.clone());
+                let widget = crate::cpu::run(deadline, move || {
+                    crate::embedded::recognize_document(&widget_url, &widget_text)
+                })
+                .await?
+                .ok_or_else(|| {
+                    Error::new("EMBEDDED_FORMAT_UNSUPPORTED", "嵌入式验证声明发生变化")
+                })?;
                 let (next, summary) = self
                     .embedded(s.clone(), &current, &widget, deadline)
                     .await?;
                 details["embeddedVerification"] = summary;
-                let check =
-                    static_data::recognize(&next.url, next.status, &next.headers, &next.text)?;
+                let check = recognize(&next, deadline).await?;
                 if check.kind == "embedded-turnstile" {
                     return Err(protocol_error(
                         "EMBEDDED_NOT_SOLVED",
@@ -256,12 +269,7 @@ impl Engine {
                     )
                     .await?;
                     current = target(&s, url, deadline).await?;
-                    let check = static_data::recognize(
-                        &current.url,
-                        current.status,
-                        &current.headers,
-                        &current.text,
-                    )?;
+                    let check = recognize(&current, deadline).await?;
                     if current.status == 403
                         || matches!(check.kind.as_str(), "managed" | "blocked" | "jsd")
                     {
@@ -338,8 +346,7 @@ impl Engine {
             details["firstFlow"] = flow_details;
             details["stage"] = json!("native-parent-submitted");
             details_list.push(details.clone());
-            let checked =
-                static_data::recognize(&next.url, next.status, &next.headers, &next.text)?;
+            let checked = recognize(&next, deadline).await?;
             let received = (200..300).contains(&next.status)
                 || (next.status == 404
                     && matches!(checked.kind.as_str(), "none" | "jsd-background")
@@ -390,7 +397,7 @@ impl Engine {
         s: Arc<Session>,
         page: &HttpResponse,
         config: &Value,
-        source: &str,
+        source: &Document,
         p: &Plan,
         deadline: Instant,
     ) -> Result<(HttpResponse, Value)> {
@@ -404,9 +411,13 @@ impl Engine {
             "Managed path parameters",
         )?;
         let born = epoch_ms();
-        let locale = static_data::assignment(source, "_cf_chl_opt.bwDXz7")?
-            .and_then(|v| v["wgqFb1"].as_str().map(String::from))
-            .unwrap_or_else(|| "en-us".into());
+        let source = source.clone();
+        let locale = crate::cpu::run(deadline, move || {
+            static_data::assignment_document(&source, "_cf_chl_opt.bwDXz7")
+        })
+        .await?
+        .and_then(|v| v["wgqFb1"].as_str().map(String::from))
+        .unwrap_or_else(|| "en-us".into());
         let mut payload = initial(config, &locale);
         let cipher = Cipher::new(&p.modulus, &p.alphabet, p.mask()?, None)?;
         payload["mHsm4"] = json!(epoch_ms() - born);
@@ -596,17 +607,28 @@ impl Engine {
             .await?;
         require(frame.status == 200, "Frame page HTTP status")?;
         self.capture(&frame.content, ".frame.html")?;
-        let facts = Facts::read(&frame.text)?;
-        let source = facts
-            .script_texts
-            .into_iter()
-            .max_by_key(String::len)
-            .ok_or_else(|| Error::new("FRAME_SCRIPT_MISSING", "验证组件缺少脚本"))?;
-        self.capture(source.as_bytes(), ".frame.js")?;
-        let config = static_data::object_data(&source, "_cf_chl_opt")?
-            .ok_or_else(|| Error::new("FRAME_CONFIG_UNSUPPORTED", "验证组件缺少配置"))?;
+        let document = frame.text.clone();
+        let capture = self.clone();
+        let (config, script_index) = crate::cpu::run(deadline, move || {
+            let (index, source) = document
+                .facts()?
+                .script_texts
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, s)| s.len())
+                .ok_or_else(|| Error::new("FRAME_SCRIPT_MISSING", "验证组件缺少脚本"))?;
+            capture.capture(source.as_bytes(), ".frame.js")?;
+            let config = static_data::object_data(source, "_cf_chl_opt")?
+                .ok_or_else(|| Error::new("FRAME_CONFIG_UNSUPPORTED", "验证组件缺少配置"))?;
+            Ok((config, index))
+        })
+        .await?;
         let analysis = Instant::now();
-        let p = plan(source, true, deadline).await?;
+        let document = frame.text.clone();
+        let p = crate::cpu::run(deadline, move || {
+            Plan::analyze(&document.facts()?.script_texts[script_index], true)
+        })
+        .await?;
         let analysis_ms = analysis.elapsed().as_millis() as u64;
         for name in [
             "buiX8", "QZAb2", "RUtA1", "MsSIK5", "yoFh0", "DstX3", "cYUbN2", "DNCSh4", "RIQr4",
@@ -848,7 +870,11 @@ impl Engine {
         let finished = epoch_ms();
         let best = work.iter().max_by_key(|r| r[2]).unwrap();
         let attempts: u64 = work.iter().map(|r| r[1]).sum();
-        let mut task = crate::native_input::proof(&frame.text)?;
+        let document = frame.text.clone();
+        let mut task = crate::cpu::run(deadline, move || {
+            crate::native_input::proof_facts(document.facts()?)
+        })
+        .await?;
         copy(&mut task, &o, &["hmwT6", "nuvy8"]);
         merge(
             &mut task,

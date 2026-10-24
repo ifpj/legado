@@ -149,8 +149,8 @@ async fn mapping_overrides_explicit_port_preserves_host_cookie_and_original_sess
     );
     let a = a.unwrap();
     let b = b.unwrap();
-    assert_eq!(a.text, "A|localhost:1|/chapter");
-    assert_eq!(b.text, "B|localhost:1|/chapter");
+    assert_eq!(a.text.as_ref(), "A|localhost:1|/chapter");
+    assert_eq!(b.text.as_ref(), "B|localhost:1|/chapter");
     assert_eq!(a.url, target);
     assert!(session
         .cookies
@@ -527,7 +527,10 @@ async fn wildcard_mapping_follows_new_domains_and_precise_rules_win_without_dns(
     };
     let session = Arc::new(Session::new(Dns::new(&config).unwrap(), None).unwrap());
     let result=fetch(session,"http://initial.invalid:1/",json!({"initial.invalid:1":origin.url.trim_start_matches("http://"),"*":destination.url.trim_start_matches("http://")})).await.unwrap();
-    assert_eq!(result.text, "wildcard|new-domain.invalid:2|/chapter");
+    assert_eq!(
+        result.text.as_ref(),
+        "wildcard|new-domain.invalid:2|/chapter"
+    );
     assert_eq!(result.url, "http://new-domain.invalid:2/chapter");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
@@ -654,7 +657,7 @@ async fn redirects_keep_request_mappings_exact_and_do_not_leak_to_other_ports() 
     let session = session();
     let response=fetch(session.clone(),"http://localhost:1/",json!({"localhost:1":origin.url.trim_start_matches("http://"),"localhost:2":destination.url.trim_start_matches("http://")})).await.unwrap();
     assert_eq!(response.url, "http://localhost:2/chapter");
-    assert_eq!(response.text, "redirected|localhost:2|/chapter");
+    assert_eq!(response.text.as_ref(), "redirected|localhost:2|/chapter");
     assert!(fetch(
         session,
         "http://localhost:1/",

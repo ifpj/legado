@@ -248,7 +248,7 @@ pub fn calculate(c: &Context<'_>, results: &mut Results) -> Result<()> {
                 .filter(|v| re(r"^\.[A-Za-z][A-Za-z0-9]{3,15}$").is_match(v))
                 .collect();
             require(selectors.len() == 1, "Stylesheet selector")?;
-            let fields = stylesheets(c.html, selectors[0])?;
+            let fields = stylesheets_facts(c.html.facts()?, selectors[0])?;
             results.insert(&m.id, "native-stylesheet-text", fields, entered);
             continue;
         }
@@ -462,12 +462,15 @@ pub(crate) fn boxes(
     Ok(json!({"YGZZe2":out}))
 }
 
+#[cfg(test)]
 pub(crate) fn stylesheets(html: &str, selector: &str) -> Result<Value> {
+    stylesheets_facts(&crate::html::Facts::read(html)?, selector)
+}
+fn stylesheets_facts(facts: &crate::html::Facts, selector: &str) -> Result<Value> {
     require(
         re(r"^\.[A-Za-z][A-Za-z0-9]{3,15}$").is_match(selector),
         "Stylesheet selector",
     )?;
-    let facts = crate::html::Facts::read(html)?;
     require(facts.style_texts.len() <= 64, "Stylesheet count bound")?;
     let (mut others, mut selected) = (Vec::new(), None);
     for (index, source) in facts.style_texts.iter().enumerate() {

@@ -756,11 +756,52 @@ pub(crate) fn packed_texts(all: &[Literal]) -> Result<Vec<(usize, String)>> {
     }
     Ok(packed)
 }
+/// Check ordering once per version of the list. Mutation invalidates the check,
+/// including edits through indexing; legacy unsorted inputs retain their order.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(transparent)]
+pub struct LiteralList {
+    values: Vec<Literal>,
+    #[serde(skip)]
+    sorted: OnceLock<bool>,
+}
+impl From<Vec<Literal>> for LiteralList {
+    fn from(values: Vec<Literal>) -> Self {
+        Self {
+            values,
+            sorted: OnceLock::new(),
+        }
+    }
+}
+impl FromIterator<Literal> for LiteralList {
+    fn from_iter<T: IntoIterator<Item = Literal>>(values: T) -> Self {
+        Vec::from_iter(values).into()
+    }
+}
+impl std::ops::Deref for LiteralList {
+    type Target = Vec<Literal>;
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+impl std::ops::DerefMut for LiteralList {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.sorted.take();
+        &mut self.values
+    }
+}
+impl<'a> IntoIterator for &'a LiteralList {
+    type Item = &'a Literal;
+    type IntoIter = std::slice::Iter<'a, Literal>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter()
+    }
+}
 #[derive(Clone)]
 pub struct Response {
     pub raw: Vec<u8>,
     pub program: Program,
-    pub literals: Vec<Literal>,
+    pub literals: LiteralList,
     pub packed: Vec<(usize, String)>,
 }
 impl Response {
@@ -790,7 +831,7 @@ impl Response {
         Ok(Self {
             raw,
             program,
-            literals: all,
+            literals: all.into(),
             packed,
         })
     }
@@ -804,10 +845,23 @@ impl Response {
             .filter(|v| re(pattern).is_match(v)))
     }
     pub fn between(&self, start: usize, end: usize) -> Vec<&Literal> {
-        self.literals
-            .iter()
-            .filter(|l| start <= l.start && l.start < end)
-            .collect()
+        if start >= end {
+            return Vec::new();
+        }
+        if !self
+            .literals
+            .sorted
+            .get_or_init(|| self.literals.windows(2).all(|w| w[0].start <= w[1].start))
+        {
+            return self
+                .literals
+                .iter()
+                .filter(|l| start <= l.start && l.start < end)
+                .collect();
+        }
+        let lo = self.literals.partition_point(|l| l.start < start);
+        let hi = self.literals.partition_point(|l| l.start < end);
+        self.literals[lo..hi].iter().collect()
     }
     pub fn root(&self) -> Result<Value> {
         let values = self.values();
@@ -837,6 +891,86 @@ impl Response {
     }
 }
 pub const FLOW: &str = r"^/fo/[0-9]+:[0-9]+:[A-Za-z0-9_-]+/[a-fA-F0-9]{16,32}/[A-Za-z0-9_.-]+$";
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+    #[test]
+    fn sorted_ranges_match_full_scan_at_duplicates_and_boundaries() {
+        let positions = [0, 0, 1, 3, 3, 4, 9, 100, usize::MAX];
+        let mut response = Response {
+            raw: vec![],
+            program: Program {
+                sha256: String::new(),
+                byte_length: 0,
+                code_length: 0,
+                strings: vec![],
+            },
+            literals: positions
+                .iter()
+                .enumerate()
+                .map(|(i, &start)| Literal {
+                    start,
+                    end: start,
+                    key: None,
+                    value: i.to_string(),
+                    packed: None,
+                    continuation: 0,
+                    pool_offset: 0,
+                })
+                .collect(),
+            packed: positions
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| (p, i.to_string()))
+                .collect(),
+        };
+        let bounds = [0, 1, 2, 3, 4, 5, 9, 10, 99, 100, 101, usize::MAX];
+        for start in bounds {
+            for end in bounds {
+                let expected: Vec<_> = response
+                    .literals
+                    .iter()
+                    .filter(|l| start <= l.start && l.start < end)
+                    .map(|l| &l.value)
+                    .collect();
+                assert_eq!(
+                    response
+                        .between(start, end)
+                        .iter()
+                        .map(|l| &l.value)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
+        }
+        // Reordering and element edits must invalidate the cached ordering flag.
+        response.literals.reverse();
+        response.literals[0].start = 3;
+        for start in bounds {
+            for end in bounds {
+                let expected: Vec<_> = response
+                    .literals
+                    .iter()
+                    .filter(|l| start <= l.start && l.start < end)
+                    .map(|l| &l.value)
+                    .collect();
+                assert_eq!(
+                    response
+                        .between(start, end)
+                        .iter()
+                        .map(|l| &l.value)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
+        }
+        response.literals.sort_by_key(|l| l.start);
+        assert_eq!(response.between(3, 4).len(), 3);
+        response.literals.clear();
+        response.packed.clear();
+        assert!(response.between(0, usize::MAX).is_empty());
+    }
+}
 pub const TASK: &str = r"^[A-Za-z0-9_.-]+-[0-9]{10}-1\.2\.1\.1-[A-Za-z0-9_.-]+$";
 pub const NONCE: &str = r"^[A-Za-z0-9_-]{43}$";
 pub fn token(v: &str) -> bool {

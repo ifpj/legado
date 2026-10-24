@@ -5,12 +5,11 @@ pub fn root() -> Value {
     json!({"CAHKN0":"[]","KOmHB7":"Invalid code point -1".len()-1,"HmLug8":1|2|4})
 }
 fn style_data(
-    html: &str,
+    facts: &Facts,
 ) -> Result<(
     Vec<(String, indexmap::IndexMap<String, String>)>,
     Vec<Value>,
 )> {
-    let facts = Facts::read(html)?;
     require(
         !facts.style_texts.is_empty() && facts.style_texts.len() <= 16,
         "Widget styles bounds",
@@ -35,10 +34,13 @@ fn style_data(
     Ok((rules, sheets))
 }
 pub fn proof_styles(html: &str) -> Result<Value> {
-    Ok(json!(style_data(html)?.1))
+    Ok(json!(style_data(&Facts::read(html)?)?.1))
 }
 pub fn proof(html: &str) -> Result<Value> {
-    let (rules, sheets) = style_data(html)?;
+    proof_facts(&Facts::read(html)?)
+}
+pub(crate) fn proof_facts(facts: &Facts) -> Result<Value> {
+    let (rules, sheets) = style_data(facts)?;
     let inputs: Vec<_> = rules
         .iter()
         .filter(|(selector, s)| {

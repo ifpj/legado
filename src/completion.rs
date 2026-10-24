@@ -86,7 +86,8 @@ mod embedded_completion_tests {
                 packed: None,
                 continuation: 0,
                 pool_offset: 0,
-            }],
+            }]
+            .into(),
             packed: vec![],
         };
         assert_eq!(

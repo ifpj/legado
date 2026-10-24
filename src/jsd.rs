@@ -54,10 +54,11 @@ pub async fn submit(
     s: &Session,
     page_url: &str,
     config: &Value,
-    source: &str,
+    source: &crate::html::Document,
     deadline: Instant,
 ) -> Result<Value> {
-    let info = inspect(source)?;
+    let source = source.clone();
+    let info = crate::cpu::run(deadline, move || inspect(&source)).await?;
     require(
         info["codec"] == "deflate-xorshift-v1"
             && info["alphabet"].is_string()
@@ -104,12 +105,11 @@ pub(crate) fn inspect(source: &str) -> Result<Value> {
     parser
         .set_language(&tree_sitter_javascript::LANGUAGE.into())
         .map_err(|e| Error::new("PARSER_ERROR", e.to_string()))?;
-    let tree = parser
-        .parse(source, None)
-        .ok_or_else(|| Error::new("PARSER_ERROR", "JSD syntax"))?;
+    let tree = crate::cpu::parse(&mut parser, source)?;
     let mut alphabets = HashSet::new();
     let mut paths = HashSet::new();
     for node in crate::constants::walk(tree.root_node(), true) {
+        crate::cpu::check()?;
         if !matches!(node.kind(), "string" | "template_string") {
             continue;
         }
