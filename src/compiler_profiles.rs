@@ -7,6 +7,8 @@ use crate::{
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
+#[cfg(test)]
+mod prefix_tests;
 
 pub fn unknowns<'a>(
     t: &Tables<'a>,
@@ -649,13 +651,79 @@ pub fn dispatcher<'a>(t: &Tables<'a>, f: &Format) -> Result<Value> {
     .into_iter()
     .filter(|n| n.kind() == "function_declaration")
     .collect();
+    let prefix = dispatcher_prefix(t, &functions)?;
+    let slots = |weights: &[u32], shifts: &[u32]| -> Result<Vec<usize>> {
+        shifts
+            .iter()
+            .map(|shift| {
+                weights
+                    .iter()
+                    .position(|v| *v == 1u32 << shift)
+                    .ok_or_else(|| Error::new("INVALID_DATA", "Packing order"))
+            })
+            .collect()
+    };
+    Ok(
+        json!({"opcode":opcode,"register_slot":singles[0].1,"register_mask":singles[0].0,"hash_slots":slots(&hashes[0].1,&[24,16,8,0])?,"target_slots":slots(&targets[0].1,&[16,8,0])?,"key_slot":singles[1].1,"key_mask":singles[1].0,"fnv_seed":*seeds.iter().next().unwrap(),"prefix":prefix,"digest_slots":slots(&digest_weights,&[24,16,8,0])?}),
+    )
+}
+
+fn dispatcher_prefix<'a>(t: &Tables<'a>, functions: &[Node<'a>]) -> Result<Vec<u8>> {
+    const IV: [u32; 8] = [
+        1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635,
+        1541459225,
+    ];
     let mut prefixes = HashSet::new();
-    for function in &functions {
-        if !t.text(*function).contains("1779033703") || !t.text(*function).contains("1024") {
+    let mut helpers = 0;
+    for function in functions {
+        crate::cpu::check()?;
+        let rows = t.walk(*function, false);
+        // Obfuscation can spell the chunk size as ~-1025 or XOR arithmetic,
+        // and IV words as expressions. Match their static values and shape,
+        // not decimal substrings that may disappear or occur in unrelated code.
+        let scalar_binding = |expected: f64| {
+            rows.iter().any(|n| {
+                let fields = match n.kind() {
+                    "variable_declarator" => ("name", "value"),
+                    "assignment_expression" => ("left", "right"),
+                    _ => return false,
+                };
+                let (Ok(name), Ok(value)) = (child(*n, fields.0), child(*n, fields.1)) else {
+                    return false;
+                };
+                name.kind() == "identifier"
+                    && matches!(
+                        unwrap(value).kind(),
+                        "number" | "unary_expression" | "binary_expression"
+                    )
+                    && t.value(value).and_then(|v| v.number()) == Ok(expected)
+            })
+        };
+        let has_iv = rows.iter().filter(|n| n.kind() == "array").any(|n| {
+            let values = children(*n);
+            values.len() == IV.len()
+                && values.iter().zip(IV).all(|(n, word)| {
+                    t.value(*n).and_then(|v| v.integer()).is_ok_and(|v| {
+                        (i32::MIN as i64..=u32::MAX as i64).contains(&v) && v as u32 == word
+                    })
+                })
+        });
+        // Older supported helper forms declare the IV anchor and block size
+        // as scalar bindings rather than an inline IV array/chunk multiply.
+        if !has_iv && !scalar_binding(IV[0] as f64) {
             continue;
         }
-        for n in t
-            .walk(*function, true)
+        let has_chunk_stride = rows.iter().any(|n| {
+            operation(t, *n, "*").is_some_and(|pair| {
+                pair.into_iter()
+                    .any(|n| t.value(n).and_then(|v| v.number()) == Ok(1024.0))
+            })
+        });
+        if !has_chunk_stride && !scalar_binding(1024.0) {
+            continue;
+        }
+        helpers += 1;
+        for n in rows
             .into_iter()
             .filter(|n| n.kind() == "ternary_expression")
         {
@@ -694,21 +762,14 @@ pub fn dispatcher<'a>(t: &Tables<'a>, f: &Format) -> Result<Value> {
             prefixes.insert(prefix);
         }
     }
-    require(prefixes.len() == 1, "Dispatcher BLAKE3 prefix")?;
-    let slots = |weights: &[u32], shifts: &[u32]| -> Result<Vec<usize>> {
-        shifts
-            .iter()
-            .map(|shift| {
-                weights
-                    .iter()
-                    .position(|v| *v == 1u32 << shift)
-                    .ok_or_else(|| Error::new("INVALID_DATA", "Packing order"))
-            })
-            .collect()
-    };
-    Ok(
-        json!({"opcode":opcode,"register_slot":singles[0].1,"register_mask":singles[0].0,"hash_slots":slots(&hashes[0].1,&[24,16,8,0])?,"target_slots":slots(&targets[0].1,&[16,8,0])?,"key_slot":singles[1].1,"key_mask":singles[1].0,"fnv_seed":*seeds.iter().next().unwrap(),"prefix":prefixes.into_iter().next().unwrap(),"digest_slots":slots(&digest_weights,&[24,16,8,0])?}),
-    )
+    crate::cpu::check()?;
+    if prefixes.len() != 1 {
+        return Err(Error {
+            details: json!({"stage":"dispatcher-profile","hashHelpers":helpers,"prefixCandidates":prefixes.len()}),
+            ..Error::new("UNSUPPORTED_FORMAT", "Dispatcher BLAKE3 prefix")
+        });
+    }
+    Ok(prefixes.into_iter().next().unwrap())
 }
 pub fn framed_salt(t: &Tables<'_>) -> Result<(u8, u32)> {
     let (handler, opcode) = handler(t, 36)?;
