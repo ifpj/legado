@@ -798,6 +798,81 @@ impl<'a> IntoIterator for &'a LiteralList {
         self.values.iter()
     }
 }
+fn recover_literals(
+    raw: &[u8],
+    program: &Program,
+    plan: &Plan,
+    all: &mut Vec<Literal>,
+) -> Result<()> {
+    let raw = &raw[..program.code_length];
+    let protected: Vec<_> = all
+        .iter()
+        .filter(|l| l.packed.is_some() || l.value.len() >= 8)
+        .map(|l| (l.start, l.end))
+        .collect();
+    let seen: HashSet<_> = all.iter().map(|l| (l.start, l.value.clone())).collect();
+    let mut budget = 8 * 1024 * 1024usize;
+    for l in literals(raw, program, plan, true, 64, false)? {
+        crate::cpu::check()?;
+        if l.packed.is_some()
+            || seen.contains(&(l.start, l.value.clone()))
+            || protected.iter().any(|(a, b)| *a < l.start && l.start < *b)
+        {
+            continue;
+        }
+        let identifier = re(r"^[A-Za-z0-9_$]{4,64}$").is_match(&l.value);
+        let authenticated = if !identifier && !l.value.is_empty() {
+            literal_call_anchor(raw, plan, &l, &mut budget)?
+        } else {
+            false
+        };
+        if identifier || authenticated {
+            if authenticated {
+                // A short pool-reference false positive can hide an inline
+                // string. The following call authenticates the latter's key
+                // and exact endpoint; do not keep its overlapping competitor.
+                all.retain(|old| !(old.start < l.start && l.start < old.end));
+            }
+            all.push(l);
+        }
+    }
+    Ok(())
+}
+fn literal_call_anchor(
+    raw: &[u8],
+    plan: &Plan,
+    literal: &Literal,
+    budget: &mut usize,
+) -> Result<bool> {
+    let Some(entry) = plan.meta["input_data_profile"].get("flow-call") else {
+        return Ok(false);
+    };
+    let at = literal.end;
+    if literal.start >= at || at + 8 > raw.len() {
+        return Ok(false);
+    }
+    let f = &plan.format;
+    let previous = literal.instruction_key(raw, f);
+    let opcode = uint(&entry[0])? as u8;
+    if f.opcode(raw[at], previous, at) != opcode {
+        return Ok(false);
+    }
+    let key = f.key(previous, opcode);
+    let len = ((f.byte(raw[at + 1], key) as usize) << 16)
+        | ((f.byte(raw[at + 2], key) as usize) << 8)
+        | f.byte(raw[at + 3], key) as usize;
+    if !(4..=65536).contains(&len) || at + 8 + len > raw.len() {
+        return Ok(false);
+    }
+    require(len <= *budget, "Literal recovery operation budget")?;
+    *budget -= len;
+    Ok(framed_end(raw, at, key, opcode, f, uint(&entry[2]["salt"])? as u32).is_some())
+}
+
+#[cfg(test)]
+#[path = "data/recovery_tests.rs"]
+mod recovery_tests;
+
 #[derive(Clone)]
 pub struct Response {
     pub raw: Vec<u8>,
@@ -811,21 +886,7 @@ impl Response {
         let raw = STANDARD.decode(encoded)?;
         let program = program(&raw, &plan.format, unframed)?;
         let mut all = literals(&raw, &program, plan, false, 65535, false)?;
-        let protected: Vec<_> = all
-            .iter()
-            .filter(|l| l.packed.is_some() || l.value.len() >= 8)
-            .map(|l| (l.start, l.end))
-            .collect();
-        let seen: HashSet<_> = all.iter().map(|l| (l.start, l.value.clone())).collect();
-        for l in literals(&raw, &program, plan, true, 64, false)? {
-            if l.packed.is_none()
-                && re(r"^[A-Za-z0-9_$]{4,64}$").is_match(&l.value)
-                && !seen.contains(&(l.start, l.value.clone()))
-                && !protected.iter().any(|(a, b)| *a < l.start && l.start < *b)
-            {
-                all.push(l)
-            }
-        }
+        recover_literals(&raw, &program, plan, &mut all)?;
         all.sort_by_key(|l| l.start);
         let conflicts = conflicting_literals(&raw[..program.code_length], &all, plan)?;
         all.retain(|l| !conflicts.contains(&l.start));
