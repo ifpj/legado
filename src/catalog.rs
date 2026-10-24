@@ -541,10 +541,25 @@ impl Catalog {
             let index = targets.partition_point(|t| t.target <= module.metadata);
             require(index > 0, "Registration block missing")?;
             let name = &targets[index - 1].name;
-            require(
-                !registrations.contains_key(name) && edges.get(name) == Some(&module.label),
-                "Registration edge mismatch",
-            )?;
+            let edge_target = edges.get(name).cloned();
+            if registrations.contains_key(name)
+                || edge_target.as_deref() != Some(module.label.as_str())
+            {
+                let mut error =
+                    crate::Error::new("UNSUPPORTED_FORMAT", "Registration edge mismatch");
+                error.details = json!({
+                    "moduleId": module.id,
+                    "moduleLabel": module.label,
+                    "moduleStart": module.start,
+                    "moduleEnd": module.end,
+                    "moduleMetadata": module.metadata,
+                    "targetName": name,
+                    "targetIndex": index - 1,
+                    "edgeTarget": edge_target,
+                    "duplicateRegistration": registrations.contains_key(name),
+                });
+                return Err(error);
+            }
             registrations.insert(name.clone(), module.id.clone());
         }
         for (label, values) in adjacent {

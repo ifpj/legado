@@ -35,6 +35,12 @@ fn kind(v: &Scalar) -> &str {
         Text(_) => "string",
     }
 }
+fn callback_literal_allowed(value: &str) -> bool {
+    matches!(
+        value,
+        "RTCRtpReceiver" | "trustedTypes" | "bezierCurveTo" | "dispatchEvent" | "visibilityState"
+    )
+}
 pub(crate) fn text(v: &Scalar) -> String {
     match v {
         Undefined => "undefined".into(),
@@ -569,7 +575,8 @@ pub fn callbacks(c: &Context<'_>, results: &mut Results) -> Result<()> {
             continue;
         }
         if values.iter().any(|v| {
-            !matches!(*v, "" | "eval" | "this" | "removeEventListener")
+            !callback_literal_allowed(v)
+                && !matches!(*v, "" | "eval" | "this" | "removeEventListener")
                 && !(v.len() == 1
                     && v.chars()
                         .all(|c| c.is_ascii_graphic() || matches!(c, ' ' | '\r' | '\n' | '\t')))
@@ -592,6 +599,25 @@ pub fn callbacks(c: &Context<'_>, results: &mut Results) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::callback_literal_allowed;
+
+    #[test]
+    fn callback_filter_accepts_audited_browser_api_names_only() {
+        for value in [
+            "RTCRtpReceiver",
+            "trustedTypes",
+            "bezierCurveTo",
+            "dispatchEvent",
+            "visibilityState",
+        ] {
+            assert!(callback_literal_allowed(value));
+        }
+        assert!(!callback_literal_allowed("unknownLongConstant"));
+    }
 }
 
 pub(crate) fn fragment(source: &str) -> Result<String> {

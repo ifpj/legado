@@ -130,10 +130,18 @@ pub fn calculate(context: &Context<'_>) -> Result<Results> {
             continue;
         }
         if let Some((kind, fields)) = environment(&values, &document, &parent, &json!({}), true)? {
-            require(
-                !results.kinds.iter().any(|k| k == kind),
-                "Duplicate native environment task",
-            )?;
+            if let Some(previous_index) = results.kinds.iter().position(|k| k == kind) {
+                let mut error =
+                    Error::new("UNSUPPORTED_FORMAT", "Duplicate native environment task");
+                error.details = json!({
+                    "kind": kind,
+                    "moduleId": m.id,
+                    "moduleStart": m.start,
+                    "moduleEnd": m.end,
+                    "previousKindIndex": previous_index,
+                });
+                return Err(error);
+            }
             results.insert(&m.id, kind, fields, entered);
             continue;
         }
