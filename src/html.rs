@@ -57,6 +57,13 @@ impl serde::Serialize for Document {
     }
 }
 impl Document {
+    /// Move the final response body when its analysis users have finished.
+    pub fn into_text(self) -> String {
+        match Arc::try_unwrap(self.0) {
+            Ok(document) => document.source,
+            Err(document) => document.source.clone(),
+        }
+    }
     pub fn facts(&self) -> Result<&Facts> {
         crate::cpu::check()?;
         if let Some(facts) = self.0.facts.get() {
@@ -248,6 +255,20 @@ pub fn title_fingerprint(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn final_text_moves_its_allocation_and_preserves_other_readers() {
+        let source = "正文😀".repeat(1024);
+        let pointer = source.as_ptr();
+        let document = Document::from(source);
+        document.facts().unwrap();
+        let moved = document.into_text();
+        assert_eq!(moved.as_ptr(), pointer);
+        let shared = Document::from(moved);
+        let reader = shared.clone();
+        assert_eq!(shared.into_text(), &*reader);
+        let original = reader.into_text();
+        assert_eq!(original.as_ptr(), pointer);
+    }
     #[test]
     fn concurrent_consumers_share_facts_only_within_the_same_response() {
         let script = "/*中文😀*/let x='value';".repeat(10_000);

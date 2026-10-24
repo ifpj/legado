@@ -6,6 +6,8 @@ use crate::{
     Error, Result,
 };
 use serde_json::{json, Value};
+mod reply;
+use reply::{Format, Reply};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{atomic::Ordering, Arc, Mutex, Weak},
@@ -168,20 +170,37 @@ impl Service {
         json!({"items":stats.history,"limit":200,"requests":stats.total,"persistent":false})
     }
     pub async fn fetch(&self, options: Value, analyze: bool, export: bool) -> Result<Value> {
-        self.execute(options, analyze, export, false)
+        self.execute(options, analyze, export, Format::Value)
             .await
-            .map(|(v, _)| v)
+            .map(|reply| reply.value)
+    }
+    pub(crate) async fn fetch_json(
+        &self,
+        options: Value,
+        analyze: bool,
+        export: bool,
+    ) -> Result<Vec<u8>> {
+        self.execute(options, analyze, export, Format::Json)
+            .await
+            .map(|reply| reply.bytes)
+    }
+    pub(crate) async fn html(&self, options: Value) -> Result<(Value, Vec<u8>)> {
+        self.execute(options, false, false, Format::Html)
+            .await
+            .map(|reply| (reply.value, reply.bytes))
     }
     pub async fn image(&self, options: Value) -> Result<(Value, Vec<u8>)> {
-        self.execute(options, false, false, true).await
+        self.execute(options, false, false, Format::Image)
+            .await
+            .map(|reply| (reply.value, reply.bytes))
     }
     async fn execute(
         &self,
         options: Value,
         analyze: bool,
         export: bool,
-        image: bool,
-    ) -> Result<(Value, Vec<u8>)> {
+        format: Format,
+    ) -> Result<Reply> {
         let (network, connect_to) = self.network.request(&options)?;
         let dns = if network == self.network {
             self.dns.clone()
@@ -189,8 +208,8 @@ impl Service {
             Dns::new(&network)?
         };
         crate::network::with_context(
-            RequestContext::configured(connect_to.clone(), dns),
-            self.execute_inner(options, analyze, export, image, network, connect_to),
+            RequestContext::for_response(connect_to.clone(), dns, format == Format::Image),
+            self.execute_inner(options, analyze, export, format, network, connect_to),
         )
         .await
     }
@@ -199,10 +218,10 @@ impl Service {
         options: Value,
         analyze: bool,
         export: bool,
-        image: bool,
+        format: Format,
         network: NetworkConfig,
         connect_to: ConnectTo,
-    ) -> Result<(Value, Vec<u8>)> {
+    ) -> Result<Reply> {
         let object = options
             .as_object()
             .ok_or_else(|| bad("INVALID_REQUEST", "请求必须为 JSON 对象"))?;
@@ -236,7 +255,7 @@ impl Service {
         let session = self.session(url, name, proxy.clone())?;
         let start = Instant::now();
         let deadline = start + Duration::from_secs_f64(timeout / 1000.);
-        let operation = if image {
+        let operation = if format == Format::Image {
             "image"
         } else if analyze {
             "analyze"
@@ -377,51 +396,48 @@ impl Service {
                 retry_first_error.as_ref(),
             ))
         });
-        let outcome = outcome.and_then(|(outcome, queue)| {
-            if image {
-                image_type(&outcome.response)?;
+        let outcome = match outcome {
+            Ok((outcome, queue_ms)) => {
+                active.record["stage"] = json!("preparingResponse");
+                reply::prepare(
+                    outcome,
+                    session.clone(),
+                    format,
+                    analyze,
+                    export,
+                    queue_ms,
+                    start,
+                    deadline,
+                )
+                .await
             }
-            Ok((outcome, queue))
-        });
+            Err(error) => Err(error),
+        };
         let total_ms = start.elapsed().as_secs_f64() * 1000.;
         let result = match outcome {
-            Ok((outcome, queue_ms)) => {
+            Ok(reply) => {
+                let value = &reply.value;
                 record["ok"] = json!(true);
-                record["status"] = json!(outcome.response.status);
-                record["challenge"] = outcome.details["type"].clone();
-                if let Some(retry) = outcome.details.get("freshRoundRetry") {
+                record["status"] = value["status"].clone();
+                record["challenge"] = value["challenge"]["type"].clone();
+                if let Some(retry) = value["challenge"].get("freshRoundRetry") {
                     record["freshRoundRetry"] = retry.clone();
                 }
-                record["queueMs"] = json!(queue_ms);
-                record["bytes"] = json!(outcome.response.content.len());
+                record["queueMs"] = value["timings"]["queueMs"].clone();
+                record["bytes"] = json!(reply.upstream_bytes);
                 record["route"] = json!(if proxy.is_some() { "proxy" } else { "direct" });
-                let image_kind = if image {
-                    Some(image_type(&outcome.response).unwrap())
-                } else {
-                    None
-                };
-                let bytes = if image {
-                    outcome.response.content
-                } else {
-                    Vec::new()
-                };
-                let mut value = json!({"ok":true,"status":outcome.response.status,"url":outcome.response.url,"headers":outcome.response.headers,"body":outcome.response.text,"userAgent":USER_AGENT,"challenge":outcome.details,"contentCached":false,"precomputedEnvironmentProfile":false,"strictPureAlgorithmAcceptance":outcome.solved,"analyzed":analyze,"timings":{"queueMs":queue_ms,"totalMs":total_ms}});
-                if let Some(kind) = image_kind {
-                    value.as_object_mut().unwrap().remove("body");
-                    value["imageType"] = json!(kind);
-                    value["bytes"] = json!(bytes.len());
-                }
-                if export {
-                    value.as_object_mut().unwrap().remove("body");
-                    value["credentials"] = credentials(&session, value["url"].as_str().unwrap())?;
-                }
                 let mut stats = self.stats.lock().unwrap();
                 stats.success += 1;
-                stats.strict |= outcome.solved;
-                Ok((value, bytes))
+                stats.strict |= value["strictPureAlgorithmAcceptance"] == true;
+                Ok(reply)
             }
             Err(error) => {
-                let error = annotate_timeout(error, &active.record["stage"]);
+                let mut error = annotate_timeout(error, &active.record["stage"]);
+                if error.code == "TIMEOUT" && error.details.get("freshRoundRetry").is_none() {
+                    if let Some(first) = &retry_first_error {
+                        error.details["freshRoundRetry"] = json!({"attempts":2,"firstError":first});
+                    }
+                }
                 record["ok"] = json!(false);
                 record["code"] = json!(error.code);
                 record["error"] = json!(error.message);
@@ -429,10 +445,9 @@ impl Service {
                     record["details"] = error.details.clone();
                 }
                 self.stats.lock().unwrap().failed += 1;
-                let _ = self.engine.capture(
-                    &serde_json::to_vec(&error.reply()).unwrap_or_default(),
-                    ".error.json",
-                );
+                let _ = self
+                    .engine
+                    .capture_generated(".error.json", || Ok(serde_json::to_vec(&error.reply())?));
                 Err(error)
             }
         };
@@ -484,20 +499,7 @@ fn annotate_timeout(mut error: Error, stage: &Value) -> Error {
     error
 }
 fn image_type(response: &crate::network::HttpResponse) -> Result<&'static str> {
-    let b = &response.content;
-    let kind = if b.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if b.starts_with(b"\xff\xd8\xff") {
-        Some("image/jpeg")
-    } else if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if b.starts_with(b"RIFF") && b.get(8..12) == Some(b"WEBP") {
-        Some("image/webp")
-    } else if b.get(4..8) == Some(b"ftyp") && matches!(b.get(8..12), Some(b"avif" | b"avis")) {
-        Some("image/avif")
-    } else {
-        None
-    };
+    let kind = crate::network::image_kind(&response.content);
     if response.status == 200 {
         if let Some(kind) = kind {
             return Ok(kind);

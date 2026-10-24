@@ -53,6 +53,7 @@ fn profile() -> Emulation {
 }
 pub struct RequestContext {
     pub connect_to: ConnectTo,
+    binary_images: bool,
     dns: Option<Dns>,
     transport: tokio::sync::OnceCell<Transport>,
 }
@@ -60,13 +61,18 @@ impl RequestContext {
     pub fn new(connect_to: ConnectTo) -> Arc<Self> {
         Arc::new(Self {
             connect_to,
+            binary_images: false,
             dns: None,
             transport: tokio::sync::OnceCell::new(),
         })
     }
     pub fn configured(connect_to: ConnectTo, dns: Dns) -> Arc<Self> {
+        Self::for_response(connect_to, dns, false)
+    }
+    pub(crate) fn for_response(connect_to: ConnectTo, dns: Dns, binary_images: bool) -> Arc<Self> {
         Arc::new(Self {
             connect_to,
+            binary_images,
             dns: Some(dns),
             transport: tokio::sync::OnceCell::new(),
         })
@@ -271,7 +277,11 @@ impl Session {
                 .unwrap_or(""),
         )
         .await?;
-        let text = decode(&content, &headers);
+        let text = response_text(
+            &content,
+            &headers,
+            context.as_ref().is_some_and(|c| c.binary_images),
+        );
         Ok(HttpResponse {
             status,
             url: final_url,
@@ -280,6 +290,30 @@ impl Session {
             text: text.into(),
             download_size,
         })
+    }
+}
+fn response_text(content: &[u8], headers: &Map<String, Value>, binary_images: bool) -> String {
+    // Image URLs can return HTML challenges, even with an incorrect MIME type.
+    // Skip decoding only for the same byte signatures accepted by /image.
+    if binary_images && image_kind(content).is_some() {
+        String::new()
+    } else {
+        decode(content, headers)
+    }
+}
+pub(crate) fn image_kind(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if b.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if b.starts_with(b"RIFF") && b.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else if b.get(4..8) == Some(b"ftyp") && matches!(b.get(8..12), Some(b"avif" | b"avis")) {
+        Some("image/avif")
+    } else {
+        None
     }
 }
 pub(crate) fn request_headers(

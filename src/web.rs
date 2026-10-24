@@ -60,6 +60,9 @@ fn authorized_readonly_link(
     authorized(app, &supplied)
 }
 fn send(status: StatusCode, body: String, kind: &str) -> Response {
+    send_bytes(status, body.into_bytes(), kind)
+}
+fn send_bytes(status: StatusCode, body: Vec<u8>, kind: &str) -> Response {
     let mut response = (status, body).into_response();
     let h = response.headers_mut();
     h.insert(header::CONTENT_TYPE, kind.parse().unwrap());
@@ -116,25 +119,37 @@ async fn fetch_json(
     State(app): State<App>,
     headers: HeaderMap,
     Json(options): Json<Value>,
-) -> Result<Json<Value>> {
+) -> Result<Response> {
     authorized(&app, &headers)?;
-    Ok(Json(app.service.fetch(options, false, false).await?))
+    Ok(send_bytes(
+        StatusCode::OK,
+        app.service.fetch_json(options, false, false).await?,
+        "application/json",
+    ))
 }
 async fn solve(
     State(app): State<App>,
     headers: HeaderMap,
     Json(options): Json<Value>,
-) -> Result<Json<Value>> {
+) -> Result<Response> {
     authorized(&app, &headers)?;
-    Ok(Json(app.service.fetch(options, false, true).await?))
+    Ok(send_bytes(
+        StatusCode::OK,
+        app.service.fetch_json(options, false, true).await?,
+        "application/json",
+    ))
 }
 async fn analyze(
     State(app): State<App>,
     headers: HeaderMap,
     Json(options): Json<Value>,
-) -> Result<Json<Value>> {
+) -> Result<Response> {
     authorized(&app, &headers)?;
-    Ok(Json(app.service.fetch(options, true, false).await?))
+    Ok(send_bytes(
+        StatusCode::OK,
+        app.service.fetch_json(options, true, false).await?,
+        "application/json",
+    ))
 }
 async fn fetch_html(
     State(app): State<App>,
@@ -151,11 +166,11 @@ async fn fetch_html(
             .map(Value::Number)
             .unwrap_or(Value::Null);
     }
-    let value = app.service.fetch(options, false, false).await?;
-    let mut response = send(
+    let (value, bytes) = app.service.html(options).await?;
+    let mut response = send_bytes(
         StatusCode::from_u16(value["status"].as_u64().unwrap_or(502) as u16)
             .unwrap_or(StatusCode::BAD_GATEWAY),
-        value["body"].as_str().unwrap_or("").into(),
+        bytes,
         "text/html; charset=utf-8",
     );
     for (key, name) in [

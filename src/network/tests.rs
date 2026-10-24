@@ -9,6 +9,73 @@ use std::{
     time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[test]
+fn binary_images_skip_text_but_mislabeled_challenges_are_still_decoded() {
+    let mut headers = Map::new();
+    headers.insert("content-type".into(), json!("image/png; charset=utf-8"));
+    for signature in [
+        b"\x89PNG\r\n\x1a\n".as_slice(),
+        b"\xff\xd8\xff",
+        b"GIF87a",
+        b"GIF89a",
+        b"RIFF0000WEBP",
+        b"0000ftypavif",
+        b"0000ftypavis",
+    ] {
+        let mut bytes = signature.to_vec();
+        bytes.extend(vec![0xff; 1024 * 1024]);
+        assert!(image_kind(&bytes).is_some());
+        let text = response_text(&bytes, &headers, true);
+        assert!(text.is_empty());
+        assert_eq!(text.capacity(), 0);
+        assert_eq!(
+            response_text(&bytes, &headers, false),
+            decode(&bytes, &headers)
+        );
+    }
+    let challenge = "<html><script>window._cf_chl_opt={cType:'managed'};</script>验证</html>";
+    assert_eq!(
+        response_text(challenge.as_bytes(), &headers, true),
+        challenge
+    );
+    assert_eq!(
+        response_text(b"<svg>unsupported</svg>", &headers, true),
+        "<svg>unsupported</svg>"
+    );
+}
+#[tokio::test]
+async fn binary_image_decoding_policy_stays_with_the_request_not_the_session() {
+    let server = serve(Router::new().fallback(any(|| async {
+        (
+            [("content-type", "image/gif")],
+            b"GIF89a\xff\xfe\xfd".as_slice(),
+        )
+    })))
+    .await;
+    let session = session();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let context = RequestContext::for_response(
+        ConnectTo::default(),
+        Dns::new(&NetworkConfig::default()).unwrap(),
+        true,
+    );
+    let (binary, ordinary) = tokio::join!(
+        with_context(
+            context,
+            session.request("GET", &server.url, None, &[], deadline)
+        ),
+        session.request("GET", &server.url, None, &[], deadline),
+    );
+    let binary = binary.unwrap();
+    let ordinary = ordinary.unwrap();
+    assert!(binary.text.is_empty());
+    assert_eq!(binary.content, b"GIF89a\xff\xfe\xfd");
+    assert_eq!(
+        &*ordinary.text,
+        decode(&ordinary.content, &ordinary.headers)
+    );
+    assert!(!ordinary.text.is_empty());
+}
 struct Server {
     url: String,
     task: tokio::task::JoinHandle<()>,

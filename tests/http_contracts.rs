@@ -64,9 +64,9 @@ async fn upstream(State(c): State<Arc<Counters>>, r: Request) -> Response {
     }
     let ordinal = c.get.fetch_add(1, Ordering::SeqCst) + 1;
     match path {
-        "/jsd"|"/cover-shielded"|"/reject" if !r.headers().get("cookie").and_then(|h|h.to_str().ok()).is_some_and(|h|h.contains("cf_clearance=fixture"))||path=="/reject" => {
+        "/jsd"|"/cover-shielded"|"/cover-mislabeled"|"/reject" if !r.headers().get("cookie").and_then(|h|h.to_str().ok()).is_some_and(|h|h.contains("cf_clearance=fixture"))||path=="/reject" => {
             let html="<html><body><script>window.__CF$cv$params={r:'0123456789abcdef',t:'MTc5MjQ4MDAwMA=='};</script></body></html>";
-            (StatusCode::FORBIDDEN,[("content-type","text/html")],html).into_response()
+            (StatusCode::FORBIDDEN,[("content-type",if path=="/cover-mislabeled"{"image/png"}else{"text/html"})],html).into_response()
         }
         "/cdn-cgi/challenge-platform/scripts/jsd/main.js" => format!("window._cf_chl_opt={{v:'b'}};var alphabet='{ALPHABET}',path='/jsd/oneshot/fixture/';/*2166136261 16777619 2779062077 Uint8Array*/").into_response(),
         "/managed" => (StatusCode::FORBIDDEN,[("cf-mitigated","challenge"),("content-type","text/html")],"<script>window._cf_chl_opt={cType:'managed'};</script>").into_response(),
@@ -77,7 +77,7 @@ async fn upstream(State(c): State<Arc<Counters>>, r: Request) -> Response {
         "/bomb" => {let mut encoder=GzEncoder::new(Vec::new(),Compression::fast());encoder.write_all(&vec![b'x';8*1024*1024+1]).unwrap();(StatusCode::OK,[("content-encoding","gzip")],encoder.finish().unwrap()).into_response()}
         "/cookie" => r.headers().get("cookie").and_then(|h|h.to_str().ok()).unwrap_or("").to_string().into_response(),
         "/invalid-encoding" => (StatusCode::OK,[("content-encoding","unsupported-test-encoding")],"invalid response").into_response(),
-        "/cover"|"/cover-shielded" => (StatusCode::OK,[("content-type","image/png")],pixel()).into_response(),
+        "/cover"|"/cover-shielded"|"/cover-mislabeled" => (StatusCode::OK,[("content-type","image/png")],pixel()).into_response(),
         "/cover-gzip" => {let mut encoder=GzEncoder::new(Vec::new(),Compression::fast());encoder.write_all(&pixel()).unwrap();(StatusCode::OK,[("content-type","image/png"),("content-encoding","gzip")],encoder.finish().unwrap()).into_response()},
         "/cover-svg" => (StatusCode::OK,[("content-type","image/svg+xml")],"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>").into_response(),
         "/headers" => axum::Json(r.headers().iter().map(|(k,v)|(k.to_string(),json!(v.to_str().unwrap_or("")))).collect::<serde_json::Map<_,_>>()).into_response(),
@@ -819,7 +819,12 @@ async fn image_proxy_preserves_decoded_bytes_scopes_auth_and_records_rejections(
             .status(),
         401
     );
-    for path in ["/cover", "/cover-gzip", "/cover-shielded"] {
+    for path in [
+        "/cover",
+        "/cover-gzip",
+        "/cover-shielded",
+        "/cover-mislabeled",
+    ] {
         let response = client
             .get(format!("{}/image", server.url))
             .query(&[

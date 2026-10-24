@@ -99,6 +99,16 @@ pub(crate) async fn target(s: &Session, url: &str, deadline: Instant) -> Result<
     }
 }
 impl Engine {
+    pub(crate) fn capture_generated(
+        &self,
+        suffix: &str,
+        generate: impl FnOnce() -> Result<Vec<u8>>,
+    ) -> Result<()> {
+        if self.capture_dir.is_none() {
+            return Ok(());
+        }
+        self.capture(&generate()?, suffix)
+    }
     pub fn capture(&self, content: &[u8], suffix: &str) -> Result<()> {
         if let Some(dir) = &self.capture_dir {
             std::fs::create_dir_all(dir)?;
@@ -122,10 +132,9 @@ impl Engine {
         label: &str,
         unframed: bool,
     ) -> Result<Response> {
-        self.capture(
-            &serde_json::to_vec(payload)?,
-            &format!(".{label}.payload.json"),
-        )?;
+        self.capture_generated(&format!(".{label}.payload.json"), || {
+            Ok(serde_json::to_vec(payload)?)
+        })?;
         let packet = c.encode(payload)?.into_bytes();
         let response = s
             .request(
@@ -147,10 +156,9 @@ impl Engine {
             .await?;
         self.capture(&response.content, &format!(".{label}.response"))?;
         if response.status != 200 {
-            self.capture(
-                &serde_json::to_vec(payload)?,
-                &format!(".{label}.rejected-payload.json"),
-            )?;
+            self.capture_generated(&format!(".{label}.rejected-payload.json"), || {
+                Ok(serde_json::to_vec(payload)?)
+            })?;
             return Err(protocol_error(
                 "MANAGED_CONTINUATION_REJECTED",
                 "网站拒绝挑战提交",
@@ -1009,6 +1017,8 @@ impl Engine {
         Ok((checked, summary))
     }
 }
+#[cfg(test)]
+mod capture_tests;
 pub fn calculate_all(c: &Context<'_>) -> Result<Results> {
     crate::cpu::check()?;
     let mut result = models::calculate(c)?;

@@ -403,10 +403,15 @@ pub(crate) fn recognize_document(
         config: json!({}),
         script: None,
     };
+    // Some image endpoints retain their MIME type when serving an HTML
+    // challenge. Real binary images have no text on the /image path.
+    let image_html = content.to_ascii_lowercase().starts_with("image/")
+        && re(r"(?i)^\s*(?:<!doctype\s+html\b|<html\b|<script\b)").is_match(html);
     if !content.is_empty()
         && !(["html", "javascript", "text/plain"]
             .iter()
             .any(|s| content.contains(s)))
+        && !image_html
     {
         return Ok(empty());
     }
