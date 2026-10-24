@@ -102,13 +102,6 @@ pub(crate) fn script_build(t: &Tables<'_>) -> Option<String> {
         ) {
             continue;
         }
-        let Some(arguments) = call.child_by_field_name("arguments") else {
-            continue;
-        };
-        let args = children(arguments);
-        if args.len() != 1 || t.value(args[0]).and_then(|v| v.integer()) != Ok(16) {
-            continue;
-        }
         let method = function
             .child_by_field_name("property")
             .map(|n| t.text(n).to_string())
@@ -118,6 +111,13 @@ pub(crate) fn script_build(t: &Tables<'_>) -> Option<String> {
                     .and_then(|n| t.value(n).ok()?.text().ok())
             });
         if method.as_deref() != Some("toString") {
+            continue;
+        }
+        let Some(arguments) = call.child_by_field_name("arguments") else {
+            continue;
+        };
+        let args = children(arguments);
+        if args.len() != 1 || t.value(args[0]).and_then(|v| v.integer()) != Ok(16) {
             continue;
         }
         if let Some(value) = function
@@ -163,12 +163,12 @@ pub(crate) fn transform_name(t: &Tables<'_>) -> Result<String> {
     {
         let left = child(node, "left")?;
         let right = unwrap(child(node, "right")?);
-        let Some(target_reference) = data_reference(t, left) else {
-            continue;
-        };
         if right.kind() != "call_expression" {
             continue;
         }
+        let Some(target_reference) = data_reference(t, left) else {
+            continue;
+        };
         let target = t.text(left);
         let args = children(child(right, "arguments")?);
         let function = child(right, "function")?;
@@ -822,7 +822,8 @@ pub(crate) fn constant_json(v: Constant<'_>) -> Option<Value> {
         Constant::Bool(b) => Some(json!(b)),
         Constant::Null => Some(Value::Null),
         Constant::Array(items) => items
-            .into_iter()
+            .iter()
+            .cloned()
             .map(constant_json)
             .collect::<Option<Vec<_>>>()
             .map(Value::Array),

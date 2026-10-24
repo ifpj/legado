@@ -3,6 +3,7 @@ use crate::{math::number, re, require, static_data::unquote, Error, Result};
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
+    sync::Arc,
 };
 use tree_sitter::Node;
 
@@ -12,8 +13,10 @@ pub enum Constant<'a> {
     Text(String),
     Bool(bool),
     Null,
-    Array(Vec<Constant<'a>>),
-    Object(HashMap<String, Constant<'a>>),
+    // Scope snapshots share data until a bounded local write needs its own
+    // copy. A large constant pool must not be copied on every expression.
+    Array(Arc<Vec<Constant<'a>>>),
+    Object(Arc<HashMap<String, Constant<'a>>>),
     Function(Node<'a>),
     Decoder,
     Dynamic,
@@ -306,7 +309,8 @@ impl<'a> Tables<'a> {
                 children(n)
                     .into_iter()
                     .map(|c| eval(c, env))
-                    .collect::<Result<_>>()?,
+                    .collect::<Result<Vec<_>>>()?
+                    .into(),
             ),
             "object" => {
                 let mut out = HashMap::new();
@@ -327,7 +331,7 @@ impl<'a> Tables<'a> {
                     };
                     out.insert(name, eval(child(pair, "value")?, env)?);
                 }
-                Constant::Object(out)
+                Constant::Object(out.into())
             }
             "function_expression" | "function_declaration" | "arrow_function" => {
                 Constant::Function(n)
@@ -482,7 +486,7 @@ impl<'a> Tables<'a> {
                     let Some(Constant::Array(values)) = env.get_mut(self.text(object)) else {
                         return Err(unknown("Nonlocal array assignment"));
                     };
-                    let target = values
+                    let target = Arc::make_mut(values)
                         .get_mut(index as usize)
                         .ok_or_else(|| unknown("Static array write bounds"))?;
                     *target = value.clone();
@@ -517,7 +521,7 @@ impl<'a> Tables<'a> {
                     let Constant::Array(args) = eval(args[2], env)? else {
                         return Err(unknown("Wrapper argument array"));
                     };
-                    self.invoke(f, args, depth + 1)?
+                    self.invoke(f, args.as_ref().clone(), depth + 1)?
                 } else {
                     let f = if self.text(callee) == "parseInt" {
                         None
@@ -833,7 +837,7 @@ impl<'a> Tables<'a> {
                         .map(|n| self.eval(n, &mut Env::new()))
                         .collect::<Result<Vec<_>>>()
                     {
-                        let value = Constant::Array(values);
+                        let value = Constant::Array(values.into());
                         self.globals.borrow_mut().insert(name, value.clone());
                         self.recovered_bindings.insert(node.id(), value);
                     }
@@ -923,10 +927,12 @@ impl<'a> Tables<'a> {
         // recursively rebuilding an unfinished scope.
         self.scopes.borrow_mut().insert(parent.id(), local.clone());
         for n in rows {
-            self.scopes.borrow_mut().insert(parent.id(), local.clone());
             if !matches!(n.kind(), "assignment_expression" | "variable_declarator") {
                 continue;
             }
+            // Only binding evaluation can re-enter this scope. Avoid cloning
+            // its arrays and objects for every unrelated syntax node.
+            self.scopes.borrow_mut().insert(parent.id(), local.clone());
             let (Ok(left), Ok(right)) = (
                 child(
                     n,
@@ -966,13 +972,13 @@ impl<'a> Tables<'a> {
                             .unwrap_or(Constant::Dynamic);
                         match local.get_mut(name) {
                             Some(Constant::Object(map)) => {
-                                map.insert(k, value);
+                                Arc::make_mut(map).insert(k, value);
                             }
                             Some(Constant::Array(values)) => {
                                 if let Some(value_slot) = k
                                     .parse::<usize>()
                                     .ok()
-                                    .and_then(|index| values.get_mut(index))
+                                    .and_then(|index| Arc::make_mut(values).get_mut(index))
                                 {
                                     *value_slot = value;
                                 }

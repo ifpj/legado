@@ -317,8 +317,9 @@ impl Engine {
                 .await?;
             require(script.status == 200, "Challenge script HTTP status")?;
             self.capture(&script.content, ".js")?;
+            let analysis = Instant::now();
             let p = plan(script.text.clone(), false).await?;
-            details["managedProtocol"] = json!({"build":p.meta["build"],"nativeRust":true});
+            details["managedProtocol"] = json!({"build":p.meta["build"],"nativeRust":true,"analysisMs":analysis.elapsed().as_millis() as u64,"compiledLayoutReused":p.meta["compiledLayoutReused"]==true});
             if analyze {
                 return Ok(Outcome {
                     response: current,

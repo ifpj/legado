@@ -110,3 +110,49 @@ fn lexical_constants_and_computed_wrapper_keys_remain_scope_bound() {
         assert!(t.value(returned).is_err());
     }
 }
+
+#[test]
+fn scope_snapshots_keep_array_and_object_writes_local() {
+    let source = "function inspect(){var base={value:3};var changed=base;changed.value=7;var list=[11];var altered=list;altered[0]=19;return [base.value,list[0],changed.value,altered[0]]}";
+    let tree = parse(source);
+    let tables = Tables::new(tree.root_node(), source).unwrap();
+    let returned = tables
+        .all()
+        .iter()
+        .find(|n| n.kind() == "return_statement")
+        .unwrap()
+        .named_child(0)
+        .unwrap();
+    for _ in 0..2 {
+        let Constant::Array(values) = tables.value(returned).unwrap() else {
+            panic!("expected local snapshot values");
+        };
+        let values: Vec<_> = values.iter().map(|v| v.integer().unwrap()).collect();
+        assert_eq!(values, [3, 11, 7, 19]);
+    }
+}
+
+#[test]
+fn failed_local_array_evaluation_does_not_modify_cached_scope() {
+    let source = "function inspect(){var list=[11];return (list[0]=list[0]+8,unknown())}";
+    let tree = parse(source);
+    let tables = Tables::new(tree.root_node(), source).unwrap();
+    let returned = tables
+        .all()
+        .iter()
+        .find(|n| n.kind() == "return_statement")
+        .unwrap()
+        .named_child(0)
+        .unwrap();
+    let list = tables
+        .all()
+        .iter()
+        .copied()
+        .find(|n| n.kind() == "subscript_expression" && tables.text(*n) == "list[0]")
+        .unwrap();
+    // Build the scope first. The failed evaluation then mutates only its copy.
+    // Scope recovery itself sees the assignment, so inspect its saved value.
+    let before = tables.value(list).unwrap().integer().unwrap();
+    assert!(tables.value(returned).is_err());
+    assert_eq!(tables.value(list).unwrap().integer().unwrap(), before);
+}
