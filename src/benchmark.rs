@@ -35,16 +35,7 @@ impl ModuleCache {
         if let Some(compiled) = self.compiled.get() {
             return Ok(compiled);
         }
-        let _guard = loop {
-            crate::cpu::check()?;
-            match self.compiling.try_lock() {
-                Ok(guard) => break guard,
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    std::thread::sleep(std::time::Duration::from_millis(5))
-                }
-                Err(_) => return Err(failure("Arithmetic compiler lock poisoned")),
-            }
-        };
+        let _guard = crate::cpu::lock(&self.compiling)?;
         if let Some(compiled) = self.compiled.get() {
             return Ok(compiled);
         }

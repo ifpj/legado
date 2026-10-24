@@ -129,6 +129,14 @@ impl Service {
         Ok(session)
     }
     pub fn status(&self) -> Value {
+        self.status_with_rss(|| {
+            let mut system = sysinfo::System::new();
+            let pid = sysinfo::Pid::from_u32(std::process::id());
+            system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+            system.process(pid).map(|p| p.memory())
+        })
+    }
+    fn status_with_rss(&self, read_rss: impl FnOnce() -> Option<u64>) -> Value {
         let mut session_details: Vec<_> = self.sessions.lock().unwrap().iter().map(|((origin, name, proxy), entry)| {
             json!({"session":name,"origin":origin,"hasProxy":proxy.is_some(),"verified":entry.session.verified.load(Ordering::Acquire),"busy":Arc::strong_count(&entry.session)>1,"lastUsedAtMs":entry.last_used_at_ms})
         }).collect();
@@ -141,12 +149,19 @@ impl Service {
                 .then_with(|| a["hasProxy"].as_bool().cmp(&b["hasProxy"].as_bool()))
         });
         let sessions = session_details.len();
-        let stats = self.stats.lock().unwrap();
-        let mut system = sysinfo::System::new();
-        let pid = sysinfo::Pid::from_u32(std::process::id());
-        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
-        let rss = system.process(pid).map(|p| p.memory());
-        json!({"service":"cf-gateway-rust","version":crate::version::VERSION,"buildId":crate::version::build_id(),"mode":"pure-algorithm","precomputedEnvironmentProfile":false,"strictPureAlgorithmAcceptance":stats.strict,"uptimeSeconds":self.started.elapsed().as_secs(),"requests":stats.total,"active":stats.active,"success":stats.success,"failed":stats.failed,"runtime":{"language":"Rust","python":null,"rustEnabled":true,"rssBytes":rss,"sessions":sessions,"verifiedReadConcurrency":4,"cpuWorkerLimit":crate::cpu::limit(),"responseCache":false,"defaultMode":"relay","networkMode":self.network.mode,"dnsMode":self.network.dns_mode(),"dohEnabled":self.network.doh,"dohUrl":if self.network.doh {Some(self.network.doh_url.as_str())}else{None}},"recent":stats.recent,"sessionDetails":session_details,"capabilities":{"nativeHttp":true,"managedChallenge":"native-rust-protocol","turnstile":"native-finite-recipes","jsdOneshot":"experimental"}})
+        let (strict, total, active, success, failed, recent) = {
+            let stats = self.stats.lock().unwrap();
+            (
+                stats.strict,
+                stats.total,
+                stats.active,
+                stats.success,
+                stats.failed,
+                stats.recent.clone(),
+            )
+        };
+        let rss = read_rss();
+        json!({"service":"cf-gateway-rust","version":crate::version::VERSION,"buildId":crate::version::build_id(),"mode":"pure-algorithm","precomputedEnvironmentProfile":false,"strictPureAlgorithmAcceptance":strict,"uptimeSeconds":self.started.elapsed().as_secs(),"requests":total,"active":active,"success":success,"failed":failed,"runtime":{"language":"Rust","python":null,"rustEnabled":true,"rssBytes":rss,"sessions":sessions,"verifiedReadConcurrency":4,"cpuWorkerLimit":crate::cpu::limit(),"responseCache":false,"defaultMode":"relay","networkMode":self.network.mode,"dnsMode":self.network.dns_mode(),"dohEnabled":self.network.doh,"dohUrl":if self.network.doh {Some(self.network.doh_url.as_str())}else{None}},"recent":recent,"sessionDetails":session_details,"capabilities":{"nativeHttp":true,"managedChallenge":"native-rust-protocol","turnstile":"native-finite-recipes","jsdOneshot":"experimental"}})
     }
     pub fn history(&self) -> Value {
         let stats = self.stats.lock().unwrap();
@@ -808,6 +823,43 @@ mod regression {
         ] {
             assert!(!text.contains(secret));
         }
+    }
+    #[test]
+    fn system_probe_runs_after_stats_snapshot_and_allows_request_completion() {
+        let s = service();
+        {
+            let mut stats = s.stats.lock().unwrap();
+            stats.total = 1;
+            stats.active = 1;
+        }
+        let snapshot = s.status_with_rss(|| {
+            // System inspection may be slow. Registration and the real request
+            // drop path must remain available during that inspection.
+            {
+                let mut stats = s
+                    .stats
+                    .try_lock()
+                    .expect("stats lock held during system probe");
+                stats.total += 1;
+                stats.active += 1;
+            }
+            drop(ActiveRequest {
+                stats: &s.stats,
+                record: json!({"session":"probe-test"}),
+                started: Instant::now(),
+                completed: false,
+            });
+            Some(1234)
+        });
+        assert_eq!(snapshot["requests"], 1);
+        assert_eq!(snapshot["active"], 1);
+        assert_eq!(snapshot["failed"], 0);
+        assert_eq!(snapshot["runtime"]["rssBytes"], 1234);
+        let current = s.status_with_rss(|| None);
+        assert_eq!(current["requests"], 2);
+        assert_eq!(current["active"], 1);
+        assert_eq!(current["failed"], 1);
+        assert_eq!(current["recent"][0]["code"], "CANCELLED");
     }
     #[test]
     fn session_identity_capacity_and_active_eviction_are_bounded() {

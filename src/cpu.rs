@@ -4,11 +4,11 @@ use std::{
     cell::RefCell,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, OnceLock,
+        Arc, Mutex, MutexGuard, OnceLock, TryLockError,
     },
     time::Instant,
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 #[derive(Clone)]
 struct Control {
@@ -17,6 +17,83 @@ struct Control {
 }
 thread_local! {
     static CURRENT: RefCell<Option<Control>> = const { RefCell::new(None) };
+    static ADMISSION: RefCell<Option<Admission>> = const { RefCell::new(None) };
+}
+struct Admission {
+    slots: Arc<Semaphore>,
+    permit: Option<OwnedSemaphorePermit>,
+}
+struct RestoreAdmission(Option<Admission>);
+impl Drop for RestoreAdmission {
+    fn drop(&mut self) {
+        ADMISSION.with(|slot| {
+            slot.replace(self.0.take());
+        });
+    }
+}
+fn admitted<T>(
+    control: Control,
+    slots: Arc<Semaphore>,
+    permit: OwnedSemaphorePermit,
+    work: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let _restore = RestoreAdmission(ADMISSION.with(|slot| {
+        slot.replace(Some(Admission {
+            slots,
+            permit: Some(permit),
+        }))
+    }));
+    controlled(control, work)
+}
+/// A contended cache lock parks a blocking worker, not a CPU permit. The
+/// worker must regain admission before inspecting or computing any data.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
+    check()?;
+    match mutex.try_lock() {
+        Ok(guard) => return Ok(guard),
+        Err(TryLockError::Poisoned(_)) => {
+            return Err(Error::new("TASK_ERROR", "Computation lock poisoned"))
+        }
+        Err(TryLockError::WouldBlock) => {}
+    }
+    let mut admission = ADMISSION.with(|slot| slot.borrow_mut().take());
+    if let Some(admission) = &mut admission {
+        admission.permit.take();
+    }
+    let waited = (|| loop {
+        check()?;
+        match mutex.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(Error::new("TASK_ERROR", "Computation lock poisoned"))
+            }
+            Err(TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(5))
+            }
+        }
+    })();
+    // Even a poisoned-lock error must restore admission before a caller can
+    // handle it and continue. Cancelled work exits without reacquiring a slot.
+    check()?;
+    if let Some(mut admission) = admission {
+        let slots = admission.slots.clone();
+        let permit = tokio::runtime::Handle::current().block_on(async move {
+            let pending = slots.acquire_owned();
+            tokio::pin!(pending);
+            loop {
+                tokio::select! {
+                    result = &mut pending => return result.map_err(|_| Error::new("BUSY", "计算队列已关闭")),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => check()?,
+                }
+            }
+        })?;
+        check()?;
+        admission.permit = Some(permit);
+        ADMISSION.with(|slot| {
+            slot.replace(Some(admission));
+        });
+    }
+    waited
 }
 fn timeout() -> Error {
     Error {
@@ -90,11 +167,11 @@ impl Pool {
                 .acquire_owned()
                 .await
                 .map_err(|_| Error::new("BUSY", "计算队列已关闭"))?;
+            let slots = self.slots.clone();
             tokio::task::spawn_blocking(move || {
-                // Keep the permit until the closure actually exits, including
-                // after its awaiting request has been dropped.
-                let _permit = permit;
-                controlled(control, work)
+                // Admission remains held until actual exit, except while
+                // explicitly parked on a cache lock.
+                admitted(control, slots, permit, work)
             })
             .await
             .map_err(|e| Error::new("TASK_ERROR", e.to_string()))?
@@ -114,20 +191,23 @@ impl Pool {
         };
         let _cancel = CancelOnDrop(control.clone());
         tokio::time::timeout_at(deadline.into(), async {
-            let permits = Arc::new(
-                self.slots
-                    .clone()
-                    .acquire_many_owned(count as u32)
-                    .await
-                    .map_err(|_| Error::new("BUSY", "计算队列已关闭"))?,
-            );
+            let mut permits = self
+                .slots
+                .clone()
+                .acquire_many_owned(count as u32)
+                .await
+                .map_err(|_| Error::new("BUSY", "计算队列已关闭"))?;
             let work = Arc::new(work);
             let mut workers = tokio::task::JoinSet::new();
             for index in 0..count {
-                let (permits, control, work) = (permits.clone(), control.clone(), work.clone());
+                let (permit, slots, control, work) = (
+                    permits.split(1).unwrap(),
+                    self.slots.clone(),
+                    control.clone(),
+                    work.clone(),
+                );
                 workers.spawn_blocking(move || {
-                    let _permits = permits;
-                    controlled(control, || work(index, count)).map(|v| (index, v))
+                    admitted(control, slots, permit, || work(index, count)).map(|v| (index, v))
                 });
             }
             drop(permits);
@@ -215,6 +295,91 @@ mod tests {
     use std::{sync::atomic::AtomicUsize, time::Duration};
     fn deadline() -> Instant {
         Instant::now() + Duration::from_secs(3)
+    }
+
+    #[tokio::test]
+    async fn cache_waiter_returns_its_only_slot_and_reacquires_before_resuming() {
+        let pool = Arc::new(Pool::new(1));
+        let cache = Arc::new(Mutex::new(0));
+        let owner = cache.lock().unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (p, c) = (pool.clone(), cache.clone());
+        let waiter = tokio::spawn(async move {
+            p.run(deadline(), move || {
+                let _ = started.send(());
+                let mut cached = lock(&c)?;
+                ADMISSION.with(|slot| assert!(slot.borrow().as_ref().unwrap().permit.is_some()));
+                *cached += 1;
+                Ok(())
+            })
+            .await
+        });
+        ready.await.unwrap();
+        // This work must run while the cache remains locked, even with one CPU.
+        tokio::time::timeout(Duration::from_secs(1), pool.run(deadline(), || Ok(42)))
+            .await
+            .expect("cache waiters must not consume CPU capacity")
+            .unwrap();
+        assert!(!waiter.is_finished());
+        assert_eq!(pool.slots.available_permits(), 1);
+        drop(owner);
+        waiter.await.unwrap().unwrap();
+        assert_eq!(*cache.lock().unwrap(), 1);
+        assert_eq!(pool.slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_readmission_releases_the_cache_lock_without_running_work() {
+        let pool = Arc::new(Pool::new(1));
+        let cache = Arc::new(Mutex::new(()));
+        let owner = cache.lock().unwrap();
+        let resumed = Arc::new(AtomicBool::new(false));
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (p, c, done) = (pool.clone(), cache.clone(), resumed.clone());
+        let waiter = tokio::spawn(async move {
+            p.run(deadline(), move || {
+                let _ = started.send(());
+                let _guard = lock(&c)?;
+                done.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+        });
+        ready.await.unwrap();
+        let permit =
+            tokio::time::timeout(Duration::from_secs(1), pool.slots.clone().acquire_owned())
+                .await
+                .unwrap()
+                .unwrap();
+        drop(owner);
+        // Wait until the worker has acquired the cache but is still queued for
+        // CPU admission. It must be cancellable in this state as well.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if cache.try_lock().is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        waiter.abort();
+        let _ = waiter.await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if cache.try_lock().is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("cancelled readmission must drop the cache lock");
+        assert!(!resumed.load(Ordering::SeqCst));
+        drop(permit);
+        pool.run(deadline(), || Ok(())).await.unwrap();
+        assert_eq!(pool.slots.available_permits(), 1);
     }
 
     #[tokio::test]
@@ -410,6 +575,58 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), pool.run(deadline(), || Ok(())))
                 .await
                 .expect("configuration parser must release the CPU slot after cancellation")
+                .unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn protocol_decode_and_literal_scan_leave_async_runtime_responsive_and_cancel() {
+        use base64::Engine as _;
+        let format: crate::data::Format = serde_json::from_value(serde_json::json!({
+            "byte_offset":0,"initial_key":0,"state_step":1,"state_multiplier":17,
+            "state_increment":3,"hash_salt":0,"char_xor":0,"state_quadratic":0,"char_mode":"before-subtract"
+        })).unwrap();
+        for decode in [true, false] {
+            let pool = Arc::new(Pool::new(1));
+            let encoded = base64::engine::general_purpose::STANDARD.encode(vec![
+                0;
+                if decode {
+                    8 * 1024 * 1024
+                } else {
+                    512 * 1024
+                }
+            ]);
+            let plan = crate::data::Plan {
+                format: format.clone(),
+                meta: serde_json::json!({"key_material":{"literal_tag":255,"literal_kind_slot":1}}),
+                alphabet: String::new(),
+                modulus: String::new(),
+                flow: String::new(),
+            };
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let p = pool.clone();
+            let request = tokio::spawn(async move {
+                p.run(deadline(), move || {
+                    let _ = started.send(());
+                    loop {
+                        if decode {
+                            crate::wire::flow(&encoded, "0123456789abcdef")?;
+                        } else {
+                            crate::data::Response::read(&encoded, &plan, true)?;
+                        }
+                    }
+                    #[allow(unreachable_code)]
+                    Ok(())
+                })
+                .await
+            });
+            ready.await.unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert!(!request.is_finished());
+            request.abort();
+            let _ = request.await;
+            tokio::time::timeout(Duration::from_secs(1), pool.run(deadline(), || Ok(())))
+                .await
+                .expect("response decoding and literal scans must observe cancellation")
                 .unwrap();
         }
     }

@@ -276,6 +276,9 @@ fn authenticated_targets(response: &Response, plan: &Plan) -> Result<Vec<Target>
     let targets = slots("target_slots")?;
     let mut found = Vec::new();
     for at in 0..=response.program.code_length - 26 {
+        if at % 256 == 0 {
+            crate::cpu::check()?;
+        }
         for &(_, key) in keys.at(f, raw[at], at) {
             let byte = |p: usize| f.byte(raw[p], key);
             let hash = hashes
@@ -348,6 +351,7 @@ fn select_state_table(found: Vec<Target>) -> Result<Vec<Target>> {
 }
 impl Catalog {
     pub fn read(response: &mut Response, plan: &Plan) -> Result<Self> {
+        crate::cpu::check()?;
         let descriptors = authenticated_targets(response, plan)?;
         let targets = select_state_table(descriptors.clone())?;
         let names: HashSet<_> = targets
@@ -404,6 +408,7 @@ impl Catalog {
         let first = identifiers[0].0;
         let mut labels = HashMap::<String, Vec<usize>>::new();
         for literal in &response.literals {
+            crate::cpu::check()?;
             if re(r"^[A-Za-z]{4,7}[0-9]$").is_match(&literal.value) {
                 labels
                     .entry(literal.value.clone())
@@ -436,6 +441,7 @@ impl Catalog {
         )?;
         let mut modules = Vec::new();
         for (i, (start, id, label, metadata)) in linked.iter().enumerate() {
+            crate::cpu::check()?;
             let end = linked.get(i + 1).map_or(first, |x| x.0);
             require(
                 *start < end && end <= response.program.code_length,
@@ -483,6 +489,7 @@ impl Catalog {
         literals.sort_by_key(|l| l.start);
         let mut adjacent = HashMap::<String, HashSet<String>>::new();
         for module in &self.modules {
+            crate::cpu::check()?;
             let index = literals.partition_point(|l| l.start < module.start);
             require(
                 index > 0
@@ -538,6 +545,7 @@ impl Catalog {
         }
         let mut registrations = HashMap::new();
         for module in &self.modules {
+            crate::cpu::check()?;
             let index = targets.partition_point(|t| t.target <= module.metadata);
             require(index > 0, "Registration block missing")?;
             let name = &targets[index - 1].name;

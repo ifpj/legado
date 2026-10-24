@@ -532,7 +532,9 @@ fn invoke(op: &str, a: &[Value], k: &Value) -> Result<Value> {
             a.get(4).or_else(|| k.get("profile")).unwrap_or(&json!({})),
             k.get("declarations").unwrap_or(&Value::Null),
         )?,
-        "cf_gateway.vector_data.flow_bytes" => json!(wire::flow_bytes(&b(0)?, uint(&a[1])? as i32)),
+        "cf_gateway.vector_data.flow_bytes" => {
+            json!(wire::flow_bytes(&b(0)?, uint(&a[1])? as i32)?)
+        }
         "cf_gateway.vector_data.text_bytes" => {
             let raw = b(0)?;
             let at = uint(&a[1])?;

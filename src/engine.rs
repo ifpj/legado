@@ -56,8 +56,11 @@ fn protocol_error(code: &str, message: &str, status: u16, details: Value) -> Err
 pub fn initial(config: &Value, locale: &str) -> Value {
     json!({"TawNq4":config["cType"],"QZAb2":config["cvId"],"UqwKl5":0,"gRYZ0":0,"Pzgs5":"OoGu5","URVD0":0,"shUar7":0,"ghqno0":0,"pKaqh3":1,"RUtA1":config["cITimeS"],"MsSIK5":config["md"],"YVDgD5":config["cTplC"]==1,"nTlR0":{"frLR7":0,"WxIBU1":0,"rRfi2":0,"XWXu1":0,"Mfpwg0":0,"GCgUo2":0,"GkCb5":0,"gmGY7":0},"CtUv5":false,"TKcX8":false,"iWlWL9":"iDQN3","CAHKN0":"","vvfHL3":"[]","bkOl5":0,"gfOgY8":"tQth1","Bxtcq6":locale,"lffN9":"qCZq4","BuWQ0":{"LQfqz0":"chejv1"}})
 }
-async fn plan(source: Document, frame: bool, deadline: Instant) -> Result<Plan> {
-    crate::cpu::run(deadline, move || Plan::analyze(&source, frame)).await
+async fn plan(source: Document, frame: bool, deadline: Instant) -> Result<Arc<Plan>> {
+    crate::cpu::run(deadline, move || {
+        Plan::analyze(&source, frame).map(Arc::new)
+    })
+    .await
 }
 pub(crate) async fn recognize(
     response: &HttpResponse,
@@ -110,7 +113,7 @@ impl Engine {
         &self,
         s: &Session,
         config: &Value,
-        p: &Plan,
+        p: &Arc<Plan>,
         c: &Cipher,
         payload: &Value,
         endpoint: &str,
@@ -155,14 +158,23 @@ impl Engine {
                 json!({"stage":label,"status":response.status}),
             ));
         }
-        let decoded = wire::flow(&response.text, string(&config["ray"])?)?;
-        self.capture(&decoded, &format!(".{label}.program"))?;
-        Response::read(
-            std::str::from_utf8(&decoded)
-                .map_err(|_| Error::new("INVALID_DATA", "Protocol ASCII"))?,
-            p,
-            unframed,
-        )
+        let (p, ray, label, capture) = (
+            p.clone(),
+            string(&config["ray"])?.to_string(),
+            label.to_string(),
+            self.clone(),
+        );
+        crate::cpu::run(deadline, move || {
+            let decoded = wire::flow(&response.text, &ray)?;
+            capture.capture(&decoded, &format!(".{label}.program"))?;
+            Response::read(
+                std::str::from_utf8(&decoded)
+                    .map_err(|_| Error::new("INVALID_DATA", "Protocol ASCII"))?,
+                &p,
+                unframed,
+            )
+        })
+        .await
     }
     pub async fn run(
         &self,
@@ -398,7 +410,7 @@ impl Engine {
         page: &HttpResponse,
         config: &Value,
         source: &Document,
-        p: &Plan,
+        p: &Arc<Plan>,
         deadline: Instant,
     ) -> Result<(HttpResponse, Value)> {
         for name in ["cType", "cvId", "cITimeS", "md", "cRay", "cH", "cFPWv"] {
@@ -447,7 +459,7 @@ impl Engine {
         let nav;
         let summary;
         if config["cType"] == "precursor_interstitial" {
-            let o = data.precursor()?;
+            let o = crate::cpu::run(deadline, move || data.precursor()).await?;
             require(
                 p.meta["build"] == "d2d3316b729e"
                     && config
@@ -488,7 +500,7 @@ impl Engine {
             nav = completion::navigation(&complete, p, config, &page.url)?;
             summary = json!({"taskCount":1,"nativeComputedCount":1,"nativeTaskKinds":["native-precursor-telemetry"]});
         } else {
-            let parameters = data.root()?;
+            let parameters = crate::cpu::run(deadline, move || data.root()).await?;
             let (completion, frame_summary) = self
                 .frame(
                     s.clone(),
@@ -626,7 +638,7 @@ impl Engine {
         let analysis = Instant::now();
         let document = frame.text.clone();
         let p = crate::cpu::run(deadline, move || {
-            Plan::analyze(&document.facts()?.script_texts[script_index], true)
+            Plan::analyze(&document.facts()?.script_texts[script_index], true).map(Arc::new)
         })
         .await?;
         let analysis_ms = analysis.elapsed().as_millis() as u64;
@@ -658,9 +670,10 @@ impl Engine {
             string(&config["RIQr4"])?
         } else {
             string(&root["cType"])?
-        };
+        }
+        .to_string();
         require(
-            matches!(mode, "managed" | "interactive" | "non-interactive"),
+            matches!(mode.as_str(), "managed" | "interactive" | "non-interactive"),
             "Frame parent mode",
         )?;
         merge(
@@ -682,7 +695,7 @@ impl Engine {
             string(&config["ueNyz9"])?
         );
         let wire_config = json!({"ray":config["UORq8"],"token":config["ueNyz9"]});
-        let mut data = self
+        let data = self
             .submit(
                 &s,
                 &wire_config,
@@ -696,18 +709,32 @@ impl Engine {
                 false,
             )
             .await?;
-        let catalog = Catalog::read(&mut data, &p)?;
-        let context = Context {
-            response: &data,
-            plan: &p,
-            catalog: &catalog,
-            html: &frame.text,
-            parent_html: &page.text,
-            frame_url: &url,
-            page_url: &page.url,
+        let context_data = (
+            data,
+            p.clone(),
+            frame.text.clone(),
+            page.text.clone(),
+            url.clone(),
+            page.url.clone(),
             mode,
-        };
-        let http_tasks = crate::http_tasks::tasks(&context, &config)?;
+        );
+        let (context_data, config, http_tasks) = crate::cpu::run(deadline, move || {
+            let (mut data, p, h, ph, fu, pu, mode) = context_data;
+            let catalog = Catalog::read(&mut data, &p)?;
+            let context = Context {
+                response: &data,
+                plan: &p,
+                catalog: &catalog,
+                html: &h,
+                parent_html: &ph,
+                frame_url: &fu,
+                page_url: &pu,
+                mode: &mode,
+            };
+            let http_tasks = crate::http_tasks::tasks(&context, &config)?;
+            Ok(((data, p, catalog, h, ph, fu, pu, mode), config, http_tasks))
+        })
+        .await?;
         let mut pending = tokio::task::JoinSet::new();
         for task in http_tasks {
             pending.spawn(crate::network::inherit_context(crate::http_tasks::run(
@@ -717,19 +744,9 @@ impl Engine {
                 deadline,
             )));
         }
-        let context_data = (
-            data.clone(),
-            p.clone(),
-            catalog.clone(),
-            frame.text.clone(),
-            page.text.clone(),
-            url.clone(),
-            page.url.clone(),
-            mode.to_string(),
-        );
-        let mut computed = crate::cpu::run(deadline, move || {
+        let (data, catalog, mut computed) = crate::cpu::run(deadline, move || {
             let (d, p, c, h, ph, fu, pu, m) = context_data;
-            calculate_all(&Context {
+            let computed = calculate_all(&Context {
                 response: &d,
                 plan: &p,
                 catalog: &c,
@@ -738,7 +755,8 @@ impl Engine {
                 frame_url: &fu,
                 page_url: &pu,
                 mode: &m,
-            })
+            })?;
+            Ok((d, c, computed))
         })
         .await?;
         let mut records = Vec::new();

@@ -22,6 +22,7 @@ pub fn deflate(data: &[u8]) -> Result<Vec<u8>> {
     Ok(output)
 }
 pub fn flow(encoded: &str, ray: &str) -> Result<Vec<u8>> {
+    crate::cpu::check()?;
     require(
         !ray.is_empty() && ray.len() <= 128 && ray.is_ascii() && encoded.len() <= 12 * 1024 * 1024,
         "Flow input bounds",
@@ -30,13 +31,18 @@ pub fn flow(encoded: &str, ray: &str) -> Result<Vec<u8>> {
         .bytes()
         .chain(b"_0".iter().copied())
         .fold(32u8, |a, b| a ^ b) as i32;
-    Ok(flow_bytes(&STANDARD.decode(encoded)?, key))
+    flow_bytes(&STANDARD.decode(encoded)?, key)
 }
-pub(crate) fn flow_bytes(raw: &[u8], key: i32) -> Vec<u8> {
-    raw.iter()
-        .enumerate()
-        .map(|(i, b)| ((*b as i32 - key - (i % 65535) as i32 + 65535).rem_euclid(255)) as u8)
-        .collect()
+pub(crate) fn flow_bytes(raw: &[u8], key: i32) -> Result<Vec<u8>> {
+    crate::cpu::check()?;
+    let mut decoded = Vec::with_capacity(raw.len());
+    for (i, b) in raw.iter().enumerate() {
+        if i % 16384 == 0 {
+            crate::cpu::check()?;
+        }
+        decoded.push(((*b as i32 - key - (i % 65535) as i32 + 65535).rem_euclid(255)) as u8);
+    }
+    Ok(decoded)
 }
 pub fn checked_spans(
     raw: &[u8],
@@ -50,6 +56,9 @@ pub fn checked_spans(
         let mut output = Vec::new();
         let mut budget = 64 * 1024 * 1024usize;
         for at in 0..raw.len().saturating_sub(7) {
+            if at % 256 == 0 {
+                crate::cpu::check()?;
+            }
             for &(_, key) in keys.at(format, raw[at], at) {
                 let size = (format.byte(raw[at + 1], key) as usize) << 16
                     | (format.byte(raw[at + 2], key) as usize) << 8
@@ -81,6 +90,7 @@ pub fn checked_spans(
             8192,
         )
     };
+    crate::cpu::check()?;
     require(count >= 0, "Checked span bounds")?;
     Ok(output[..count as usize * 2]
         .chunks_exact(2)

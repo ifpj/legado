@@ -339,6 +339,9 @@ pub unsafe extern "C" fn cf_checked_instruction_spans(
     let mut count = 0usize;
     let mut work_left = 64 * 1024 * 1024;
     while position + 8 <= length {
+        if position % 256 == 0 && crate::cpu::stopped() {
+            return -2;
+        }
         let key = keys[raw[position] as usize];
         let read = |index: usize| raw[index].wrapping_sub(byte_offset) ^ key;
         let size = ((read(position + 1) as usize) << 16)

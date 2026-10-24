@@ -108,7 +108,9 @@ async fn history(State(app): State<App>, headers: HeaderMap) -> Result<Json<Valu
 }
 async fn status(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value>> {
     authorized(&app, &headers)?;
-    Ok(Json(app.service.status()))
+    tokio::task::spawn_blocking(move || Json(app.service.status()))
+        .await
+        .map_err(|e| Error::new("TASK_ERROR", e.to_string()))
 }
 async fn fetch_json(
     State(app): State<App>,

@@ -62,21 +62,7 @@ impl Document {
         if let Some(facts) = self.0.facts.get() {
             return Ok(facts);
         }
-        let _guard = loop {
-            crate::cpu::check()?;
-            match self.0.analyzing.try_lock() {
-                Ok(guard) => break guard,
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    std::thread::sleep(std::time::Duration::from_millis(5))
-                }
-                Err(_) => {
-                    return Err(crate::Error::new(
-                        "INVALID_DATA",
-                        "HTML analysis lock poisoned",
-                    ))
-                }
-            }
-        };
+        let _guard = crate::cpu::lock(&self.0.analyzing)?;
         if self.0.facts.get().is_none() {
             let facts = Facts::read(self)?;
             crate::cpu::check()?;

@@ -20,7 +20,7 @@ impl LayoutCache {
         frame: bool,
         matches: &impl Fn(&Value) -> Result<bool>,
     ) -> Result<Option<Value>> {
-        let layouts = self.layouts.lock().unwrap();
+        let layouts = crate::cpu::lock(&self.layouts)?;
         let mut found = None;
         for (_, layout) in layouts.iter().filter(|(tasks, _)| *tasks == frame) {
             crate::cpu::check()?;
@@ -45,22 +45,13 @@ impl LayoutCache {
         }
         // Only cold misses serialize. Do not hold the layouts mutex while
         // compiling; warm readers remain independent and waiters can cancel.
-        let _compiling = loop {
-            crate::cpu::check()?;
-            match self.compiling.try_lock() {
-                Ok(guard) => break guard,
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    std::thread::sleep(std::time::Duration::from_millis(5))
-                }
-                Err(_) => return Err(Error::new("COMPILER_ERROR", "Compiler lock poisoned")),
-            }
-        };
+        let _compiling = crate::cpu::lock(&self.compiling)?;
         if let Some(layout) = self.lookup(frame, &matches)? {
             return Ok((layout, true));
         }
         let layout = compile()?;
         crate::cpu::check()?;
-        let mut layouts = self.layouts.lock().unwrap();
+        let mut layouts = crate::cpu::lock(&self.layouts)?;
         if !layouts
             .iter()
             .any(|(tasks, existing)| *tasks == frame && *existing == layout)
@@ -469,7 +460,10 @@ fn text(
         seed = seed.wrapping_add(2654435769);
         Ok(v)
     };
-    for _ in 0..len {
+    for i in 0..len {
+        if i % 1024 == 0 {
+            crate::cpu::check()?;
+        }
         units.push(if wide {
             ((byte(pos)? as u16) << 8) | byte(pos)? as u16
         } else {
@@ -479,6 +473,7 @@ fn text(
     String::from_utf16(&units).map_err(|_| Error::new("INVALID_DATA", "Unpaired UTF16 literal"))
 }
 pub fn program(raw: &[u8], f: &Format, unframed: bool) -> Result<Program> {
+    crate::cpu::check()?;
     require(
         !raw.is_empty() && raw.len() <= 1024 * 1024,
         "Program bounds",
@@ -514,6 +509,7 @@ pub fn program(raw: &[u8], f: &Format, unframed: bool) -> Result<Program> {
     let mut key = f.initial_key;
     let mut strings = Vec::new();
     for _ in 0..count {
+        crate::cpu::check()?;
         key = f.key(key, f.state_step);
         let d = descriptor(raw, &mut pos, f, key)?;
         strings.push(text(
@@ -615,6 +611,9 @@ pub(crate) fn literals_bounded(
     let (mut result, mut occupied, mut occupied_frame, mut work) =
         (Vec::<Literal>::new(), 0, false, 0usize);
     for start in 0..p.code_length.saturating_sub(4) {
+        if start % 256 == 0 {
+            crate::cpu::check()?;
+        }
         let mut candidates = Vec::new();
         for &(_, key) in keys.at(f, raw[start], start) {
             if f.byte(raw[start + slot], key) != tag {
@@ -695,6 +694,7 @@ pub(crate) fn literals_bounded(
                     pool_offset: frag.as_ref().map_or(0, |x| x.2),
                 })
             })();
+            crate::cpu::check()?;
             if work > max_work {
                 return Err(Error::new("INVALID_DATA", "Literal operation budget"));
             }
@@ -739,6 +739,7 @@ pub(crate) fn packed_texts(all: &[Literal]) -> Result<Vec<(usize, String)>> {
     let pool = pools.into_iter().next().unwrap_or_default();
     let mut packed = Vec::new();
     for l in all {
+        crate::cpu::check()?;
         if let Some(v) = &l.packed {
             if needed > 0 && l.continuation == 0 && l.value.chars().count() == 32770 {
                 continue;
@@ -806,6 +807,7 @@ pub struct Response {
 }
 impl Response {
     pub fn read(encoded: &str, plan: &Plan, unframed: bool) -> Result<Self> {
+        crate::cpu::check()?;
         let raw = STANDARD.decode(encoded)?;
         let program = program(&raw, &plan.format, unframed)?;
         let mut all = literals(&raw, &program, plan, false, 65535, false)?;
@@ -1055,6 +1057,7 @@ pub(crate) fn conflicting_literals(
     }
     let by_offset: HashMap<_, _> = literals.iter().map(|l| (l.start, l)).collect();
     for anchor in literals {
+        crate::cpu::check()?;
         if !(anchor.start < anchor.end && anchor.end < raw.len()) {
             continue;
         }
