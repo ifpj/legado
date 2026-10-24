@@ -5,6 +5,7 @@ pub mod compiler;
 pub mod compiler_profiles;
 pub mod completion;
 pub mod constants;
+mod cpu;
 pub mod css;
 pub mod data;
 pub mod declared;

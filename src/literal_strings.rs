@@ -92,6 +92,9 @@ fn decode(encoded: &str, mut seed: u16) -> Result<String> {
     }
     // Each iteration consumes at least one byte. There is no source evaluator.
     while position < bytes.len() {
+        if position % 256 == 0 {
+            crate::cpu::check()?;
+        }
         let value = byte(&bytes, &mut position, &mut seed)?;
         units.push(if value == 255 {
             byte(&bytes, &mut position, &mut seed)? | byte(&bytes, &mut position, &mut seed)? << 8
@@ -160,14 +163,13 @@ pub fn prepare(source: &str) -> Result<Cow<'_, str>> {
         return Ok(Cow::Borrowed(source));
     }
     require(source.len() <= 8 * 1024 * 1024, "Initializer size limit")?;
-    let tree = parser()
-        .parse(source, None)
-        .ok_or_else(|| Error::new("PARSER_ERROR", "Literal syntax"))?;
+    let tree = crate::cpu::parse(&mut parser(), source)?;
     require(!tree.root_node().has_error(), "Literal syntax unsupported")?;
     let nodes = walk(tree.root_node(), true);
     let mut recipes = HashMap::new();
     let mut owners = HashMap::new();
     for node in &nodes {
+        crate::cpu::check()?;
         if node.kind() != "variable_declarator" {
             continue;
         }
@@ -197,7 +199,9 @@ pub fn prepare(source: &str) -> Result<Cow<'_, str>> {
         .map(|n| &source[n.child_by_field_name("name").unwrap().byte_range()])
         .collect();
     let mut replacements = Vec::new();
+    let mut output_len = source.len();
     for node in nodes.iter().filter(|n| n.kind() == "call_expression") {
+        crate::cpu::check()?;
         let Some(callee) = node
             .child_by_field_name("function")
             .map(unwrap)
@@ -233,15 +237,30 @@ pub fn prepare(source: &str) -> Result<Cow<'_, str>> {
         }
         let encoded = crate::static_data::unquote(&source[args[0].byte_range()])?;
         let decoded = decode(&encoded, seed)?;
-        replacements.push((node.byte_range(), serde_json::to_string(&decoded)?));
+        let value = serde_json::to_string(&decoded)?;
+        output_len = output_len
+            .checked_sub(node.byte_range().len())
+            .and_then(|n| n.checked_add(value.len()))
+            .ok_or_else(|| Error::new("INVALID_DATA", "Decoded initializer size limit"))?;
+        require(
+            output_len <= 16 * 1024 * 1024,
+            "Decoded initializer size limit",
+        )?;
+        replacements.push((node.byte_range(), value));
     }
     if replacements.is_empty() {
         return Ok(Cow::Borrowed(source));
     }
-    let mut output = source.to_string();
-    for (range, value) in replacements.into_iter().rev() {
-        output.replace_range(range, &value);
+    let mut output = String::with_capacity(output_len);
+    let mut copied = 0;
+    for (range, value) in replacements {
+        crate::cpu::check()?;
+        require(range.start >= copied, "Overlapping literal replacements")?;
+        output.push_str(&source[copied..range.start]);
+        output.push_str(&value);
+        copied = range.end;
     }
+    output.push_str(&source[copied..]);
     require(
         output.len() <= 16 * 1024 * 1024,
         "Decoded initializer size limit",
@@ -263,5 +282,20 @@ mod tests {
         assert!(decode("jA==", 15219).is_err());
         assert_eq!(decode("jBY9xPRejAarxHPl", 15219).unwrap(), "中文😀");
         assert_eq!(decode("CV4BVHNXGlUWMQ==", 15219).unwrap(), "zero\0line\n");
+    }
+
+    #[test]
+    fn many_literals_preserve_unicode_boundaries_and_shadowed_calls() {
+        let mut source = format!("/*中文😀*/var decode={RECIPE};");
+        let mut expected = source.clone();
+        for index in 0..2000 {
+            source.push_str(&format!("var v{index}=decode(`jBY9xPRejAarxHPl`);/*尾*/"));
+            expected.push_str(&format!("var v{index}=\"中文😀\";/*尾*/"));
+        }
+        let shadow = "function shadow(decode){return decode(`LAsLWkoMQQ==`)}";
+        source.push_str(shadow);
+        expected.push_str(shadow);
+        assert_eq!(prepare(&source).unwrap(), expected);
+        assert!(matches!(prepare(&expected).unwrap(), Cow::Borrowed(_)));
     }
 }

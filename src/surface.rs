@@ -96,6 +96,7 @@ fn omitted(value: &Value) -> bool {
 }
 pub fn calculate(c: &Context<'_>, results: &mut Results) -> Result<()> {
     for m in &c.catalog.modules {
+        crate::cpu::check()?;
         let values: HashSet<_> = c
             .response
             .between(m.start, m.end)

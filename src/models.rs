@@ -58,6 +58,7 @@ pub fn calculate(context: &Context<'_>) -> Result<Results> {
     .collect();
     let properties = operands::properties(r, plan, &allowed)?;
     for m in &context.catalog.modules {
+        crate::cpu::check()?;
         if results.fields.contains_key(&m.id) {
             continue;
         }

@@ -125,6 +125,7 @@ pub(crate) fn work_limited(
             output.as_mut_ptr(),
         )
     };
+    crate::cpu::check()?;
     require(status == 0, "SHA-256 work bounds")?;
     Ok(output)
 }

@@ -278,6 +278,9 @@ pub unsafe extern "C" fn cf_sha256_work_strided(
     let mut best_counter = first;
     let mut attempts = 0;
     loop {
+        if attempts % 256 == 0 && crate::cpu::stopped() {
+            return -3;
+        }
         let counter = first + attempts * step;
         input.truncate(prefix.len());
         let _ = write!(input, "{}", counter);

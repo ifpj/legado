@@ -56,10 +56,8 @@ fn protocol_error(code: &str, message: &str, status: u16, details: Value) -> Err
 pub fn initial(config: &Value, locale: &str) -> Value {
     json!({"TawNq4":config["cType"],"QZAb2":config["cvId"],"UqwKl5":0,"gRYZ0":0,"Pzgs5":"OoGu5","URVD0":0,"shUar7":0,"ghqno0":0,"pKaqh3":1,"RUtA1":config["cITimeS"],"MsSIK5":config["md"],"YVDgD5":config["cTplC"]==1,"nTlR0":{"frLR7":0,"WxIBU1":0,"rRfi2":0,"XWXu1":0,"Mfpwg0":0,"GCgUo2":0,"GkCb5":0,"gmGY7":0},"CtUv5":false,"TKcX8":false,"iWlWL9":"iDQN3","CAHKN0":"","vvfHL3":"[]","bkOl5":0,"gfOgY8":"tQth1","Bxtcq6":locale,"lffN9":"qCZq4","BuWQ0":{"LQfqz0":"chejv1"}})
 }
-async fn plan(source: String, frame: bool) -> Result<Plan> {
-    tokio::task::spawn_blocking(move || Plan::analyze(&source, frame))
-        .await
-        .map_err(|e| Error::new("COMPILER_ERROR", e.to_string()))?
+async fn plan(source: String, frame: bool, deadline: Instant) -> Result<Plan> {
+    crate::cpu::run(deadline, move || Plan::analyze(&source, frame)).await
 }
 
 pub(crate) async fn target(s: &Session, url: &str, deadline: Instant) -> Result<HttpResponse> {
@@ -318,7 +316,7 @@ impl Engine {
             require(script.status == 200, "Challenge script HTTP status")?;
             self.capture(&script.content, ".js")?;
             let analysis = Instant::now();
-            let p = plan(script.text.clone(), false).await?;
+            let p = plan(script.text.clone(), false, deadline).await?;
             details["managedProtocol"] = json!({"build":p.meta["build"],"nativeRust":true,"analysisMs":analysis.elapsed().as_millis() as u64,"compiledLayoutReused":p.meta["compiledLayoutReused"]==true});
             if analyze {
                 return Ok(Outcome {
@@ -608,7 +606,7 @@ impl Engine {
         let config = static_data::object_data(&source, "_cf_chl_opt")?
             .ok_or_else(|| Error::new("FRAME_CONFIG_UNSUPPORTED", "验证组件缺少配置"))?;
         let analysis = Instant::now();
-        let p = plan(source, true).await?;
+        let p = plan(source, true, deadline).await?;
         let analysis_ms = analysis.elapsed().as_millis() as u64;
         for name in [
             "buiX8", "QZAb2", "RUtA1", "MsSIK5", "yoFh0", "DstX3", "cYUbN2", "DNCSh4", "RIQr4",
@@ -688,10 +686,13 @@ impl Engine {
             mode,
         };
         let http_tasks = crate::http_tasks::tasks(&context, &config)?;
-        let mut pending = Vec::new();
+        let mut pending = tokio::task::JoinSet::new();
         for task in http_tasks {
-            pending.push(tokio::spawn(crate::network::inherit_context(
-                crate::http_tasks::run(task, s.clone(), url.clone(), deadline),
+            pending.spawn(crate::network::inherit_context(crate::http_tasks::run(
+                task,
+                s.clone(),
+                url.clone(),
+                deadline,
             )));
         }
         let context_data = (
@@ -704,7 +705,7 @@ impl Engine {
             page.url.clone(),
             mode.to_string(),
         );
-        let mut computed = tokio::task::spawn_blocking(move || {
+        let mut computed = crate::cpu::run(deadline, move || {
             let (d, p, c, h, ph, fu, pu, m) = context_data;
             calculate_all(&Context {
                 response: &d,
@@ -717,13 +718,11 @@ impl Engine {
                 mode: &m,
             })
         })
-        .await
-        .map_err(|e| Error::new("TASK_ERROR", e.to_string()))??;
+        .await?;
         let mut records = Vec::new();
-        for task in pending {
-            let (task, fields, entered, finished, record) = task
-                .await
-                .map_err(|e| Error::new("TASK_ERROR", e.to_string()))??;
+        while let Some(task) = pending.join_next().await {
+            let (task, fields, entered, finished, record) =
+                task.map_err(|e| Error::new("TASK_ERROR", e.to_string()))??;
             computed.insert(&task.id, &task.kind, fields, entered);
             computed.timings.insert(task.id, (entered, finished));
             records.push(record);
@@ -837,23 +836,14 @@ impl Engine {
         let work_start = Instant::now();
         let suffix = string(&o["suffix"])?.to_string();
         let budget = uint(&o["budgetMs"])? as u64;
-        let mut workers = Vec::new();
-        for i in 0..6 {
-            let prefix = prefix.clone();
-            let suffix = suffix.clone();
-            let first = (rand::random::<u64>() % (10000 / 6)) * 6 + i;
-            workers.push(tokio::task::spawn_blocking(move || {
-                wire::work(&prefix, &suffix, budget, first, 6)
-            }));
-        }
-        let mut work = Vec::new();
-        for worker in workers {
-            work.push(
-                worker
-                    .await
-                    .map_err(|e| Error::new("WORK_ERROR", e.to_string()))??,
-            )
-        }
+        let work_prefix = prefix.clone();
+        let work = crate::cpu::group(deadline, move |i, count| {
+            let count = count as u64;
+            let first = (rand::random::<u64>() % (10000 / count)) * count + i as u64;
+            wire::work(&work_prefix, &suffix, budget, first, count)
+        })
+        .await?;
+        let worker_count = work.len();
         let elapsed = work_start.elapsed().as_secs_f64() * 1000.;
         let finished = epoch_ms();
         let best = work.iter().max_by_key(|r| r[2]).unwrap();
@@ -862,7 +852,7 @@ impl Engine {
         copy(&mut task, &o, &["hmwT6", "nuvy8"]);
         merge(
             &mut task,
-            &json!({"GEWq5":o["suffix"],"qsgV2":o["budgetMs"],"bsSd2":o["mode"],"pTaf7":3,"YwQJz9":"","fPnBP8":started,"EyyWl0":initialized,"qTNw9":clicked,"evtm8":6,"clAR9":format!("{prefix}{}",best[0]),"QaoMZ6":attempts,"dtQiW5":6,"BvSgL3":elapsed,"swsJd4":finished,"uGYqH4":entered,"dLrXX1":finished,"NEMH8":finished-entered}),
+            &json!({"GEWq5":o["suffix"],"qsgV2":o["budgetMs"],"bsSd2":o["mode"],"pTaf7":3,"YwQJz9":"","fPnBP8":started,"EyyWl0":initialized,"qTNw9":clicked,"evtm8":worker_count,"clAR9":format!("{prefix}{}",best[0]),"QaoMZ6":attempts,"dtQiW5":worker_count,"BvSgL3":elapsed,"swsJd4":finished,"uGYqH4":entered,"dLrXX1":finished,"NEMH8":finished-entered}),
         );
         task["YBguh4"]["HuPfz3"] = json!((clicked - born).to_string());
         let count = catalog.order.len();
@@ -976,6 +966,7 @@ impl Engine {
     }
 }
 pub fn calculate_all(c: &Context<'_>) -> Result<Results> {
+    crate::cpu::check()?;
     let mut result = models::calculate(c)?;
     crate::model_geometry::calculate(c, &mut result)?;
     crate::surface::calculate(c, &mut result)?;
@@ -983,5 +974,6 @@ pub fn calculate_all(c: &Context<'_>) -> Result<Results> {
     crate::semantics::calculate(c, &mut result)?;
     crate::benchmark::calculate(c, &mut result)?;
     crate::semantics::callbacks(c, &mut result)?;
+    crate::cpu::check()?;
     Ok(result)
 }

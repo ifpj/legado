@@ -6,8 +6,183 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
 };
+
+#[derive(Default)]
+struct LayoutCache {
+    layouts: Mutex<Vec<(bool, Value)>>,
+    compiling: Mutex<()>,
+}
+impl LayoutCache {
+    fn lookup(
+        &self,
+        frame: bool,
+        matches: &impl Fn(&Value) -> Result<bool>,
+    ) -> Result<Option<Value>> {
+        let layouts = self.layouts.lock().unwrap();
+        let mut found = None;
+        for (_, layout) in layouts.iter().filter(|(tasks, _)| *tasks == frame) {
+            crate::cpu::check()?;
+            if matches(layout)? {
+                if let Some(previous) = &found {
+                    require(previous == layout, "Ambiguous initializer layout")?;
+                } else {
+                    found = Some(layout.clone());
+                }
+            }
+        }
+        Ok(found)
+    }
+    fn resolve(
+        &self,
+        frame: bool,
+        matches: impl Fn(&Value) -> Result<bool>,
+        compile: impl FnOnce() -> Result<Value>,
+    ) -> Result<(Value, bool)> {
+        if let Some(layout) = self.lookup(frame, &matches)? {
+            return Ok((layout, true));
+        }
+        // Only cold misses serialize. Do not hold the layouts mutex while
+        // compiling; warm readers remain independent and waiters can cancel.
+        let _compiling = loop {
+            crate::cpu::check()?;
+            match self.compiling.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5))
+                }
+                Err(_) => return Err(Error::new("COMPILER_ERROR", "Compiler lock poisoned")),
+            }
+        };
+        if let Some(layout) = self.lookup(frame, &matches)? {
+            return Ok((layout, true));
+        }
+        let layout = compile()?;
+        crate::cpu::check()?;
+        let mut layouts = self.layouts.lock().unwrap();
+        if !layouts
+            .iter()
+            .any(|(tasks, existing)| *tasks == frame && *existing == layout)
+        {
+            if layouts.len() >= 32 {
+                layouts.remove(0);
+            }
+            layouts.push((frame, layout.clone()));
+        }
+        Ok((layout, false))
+    }
+}
+
+#[cfg(test)]
+mod layout_cache_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Barrier,
+    };
+
+    #[test]
+    fn concurrent_misses_compile_and_store_one_layout() {
+        let cache = Arc::new(LayoutCache::default());
+        let starts = Arc::new(Barrier::new(8));
+        let compiled = Arc::new(AtomicUsize::new(0));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (cache, starts, compiled) = (cache.clone(), starts.clone(), compiled.clone());
+                std::thread::spawn(move || {
+                    starts.wait();
+                    cache
+                        .resolve(
+                            true,
+                            |v| Ok(v["build"] == "current"),
+                            || {
+                                compiled.fetch_add(1, Ordering::SeqCst);
+                                std::thread::sleep(std::time::Duration::from_millis(20));
+                                Ok(json!({"build":"current","shape":1}))
+                            },
+                        )
+                        .unwrap()
+                })
+            })
+            .collect();
+        let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert_eq!(compiled.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.layouts.lock().unwrap().len(), 1);
+        assert_eq!(results.iter().filter(|(_, reused)| !reused).count(), 1);
+        assert!(results.iter().all(|(v, _)| *v == results[0].0));
+    }
+
+    #[test]
+    fn identical_layouts_are_equivalent_but_conflicts_still_fail() {
+        let cache = LayoutCache::default();
+        let layout = json!({"build":"current","shape":1});
+        *cache.layouts.lock().unwrap() = vec![
+            (true, layout.clone()),
+            (true, layout.clone()),
+            (false, json!({"shape":2})),
+        ];
+        assert_eq!(cache.lookup(true, &|_| Ok(true)).unwrap(), Some(layout));
+        cache
+            .layouts
+            .lock()
+            .unwrap()
+            .push((true, json!({"build":"current","shape":3})));
+        assert_eq!(
+            cache.lookup(true, &|_| Ok(true)).unwrap_err().message,
+            "Ambiguous initializer layout"
+        );
+    }
+
+    #[test]
+    fn failed_compilation_does_not_poison_cache_or_block_retry() {
+        let cache = LayoutCache::default();
+        assert!(cache
+            .resolve(
+                false,
+                |_| Ok(true),
+                || Err(Error::new("TIMEOUT", "cancelled"))
+            )
+            .is_err());
+        assert!(cache.layouts.lock().unwrap().is_empty());
+        assert_eq!(
+            cache
+                .resolve(false, |_| Ok(true), || Ok(json!({"fresh":true})))
+                .unwrap(),
+            (json!({"fresh":true}), false)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_cold_waiter_cannot_publish_a_layout() {
+        let cache = Arc::new(LayoutCache::default());
+        let compiled = Arc::new(AtomicUsize::new(0));
+        let owner = cache.compiling.lock().unwrap();
+        let (worker_cache, worker_compiled) = (cache.clone(), compiled.clone());
+        let result = crate::cpu::run(
+            std::time::Instant::now() + std::time::Duration::from_millis(20),
+            move || {
+                worker_cache.resolve(
+                    true,
+                    |_| Ok(true),
+                    || {
+                        worker_compiled.fetch_add(1, Ordering::SeqCst);
+                        Ok(json!({"cancelled":true}))
+                    },
+                )
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap_err().code, "TIMEOUT");
+        drop(owner);
+        let current = cache
+            .resolve(true, |_| Ok(true), || Ok(json!({"fresh":true})))
+            .unwrap();
+        assert_eq!(current.0, json!({"fresh":true}));
+        assert_eq!(compiled.load(Ordering::SeqCst), 0);
+        assert_eq!(cache.layouts.lock().unwrap().len(), 1);
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Format {
@@ -164,56 +339,56 @@ impl Plan {
     pub fn analyze(source: &str, frame: bool) -> Result<Self> {
         let prepared = crate::literal_strings::prepare(source)?;
         let source = prepared.as_ref();
-        static LAYOUTS: OnceLock<std::sync::Mutex<Vec<(bool, Value)>>> = OnceLock::new();
+        static LAYOUTS: OnceLock<LayoutCache> = OnceLock::new();
         let layouts = LAYOUTS.get_or_init(|| {
             let data: Value =
                 serde_json::from_str(include_str!("../profiles/protocol-layouts-v1.json"))
                     .expect("compiled layouts");
-            std::sync::Mutex::new(
-                data["layouts"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| {
-                        (
-                            v["frameTasks"] == true,
-                            normalize(&v["plan"]).expect("compiled layout schema"),
-                        )
-                    })
-                    .collect(),
-            )
+            LayoutCache {
+                layouts: Mutex::new(
+                    data["layouts"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| {
+                            (
+                                v["frameTasks"] == true,
+                                normalize(&v["plan"]).expect("compiled layout schema"),
+                            )
+                        })
+                        .collect(),
+                ),
+                compiling: Mutex::new(()),
+            }
         });
-        let mut matches = Vec::new();
         let programs = re(r#"['"`]([A-Za-z0-9+/]{1000,20000}={0,2})['"`]"#);
         let hashes: HashSet<_> = programs
             .captures_iter(source)
             .filter_map(|c| STANDARD.decode(&c[1]).ok())
             .map(|v| hex::encode(Sha256::digest(v)))
             .collect();
-        for (tasks, plan) in layouts.lock().unwrap().iter() {
-            if *tasks != frame {
-                continue;
-            }
-            if hashes.contains(string(&plan["key_material"]["program_sha256"])?)
-                && source.contains(string(&plan["build"])?)
-                && source.contains(string(&plan["key_material"]["helper"])?)
-            {
-                matches.push(plan.clone())
-            }
-        }
-        if matches.is_empty() {
-            let mut plan = crate::compiler::compile(source, frame)?;
-            let mut layouts = layouts.lock().unwrap();
-            if layouts.len() >= 32 {
-                layouts.remove(0);
-            }
-            layouts.push((frame, plan.meta.clone()));
+        let mut compiled = None;
+        let (mut meta, reused) = layouts.resolve(
+            frame,
+            |plan| {
+                Ok(
+                    hashes.contains(string(&plan["key_material"]["program_sha256"])?)
+                        && source.contains(string(&plan["build"])?)
+                        && source.contains(string(&plan["key_material"]["helper"])?),
+                )
+            },
+            || {
+                let plan = crate::compiler::compile_prepared(source, frame)?;
+                let meta = plan.meta.clone();
+                compiled = Some(plan);
+                Ok(meta)
+            },
+        )?;
+        if let Some(mut plan) = compiled {
             plan.meta["compiledLayoutReused"] = json!(false);
             return Ok(plan);
         }
-        require(matches.len() == 1, "Ambiguous initializer layout")?;
-        let mut meta = matches.pop().unwrap();
-        meta["compiledLayoutReused"] = json!(true);
+        meta["compiledLayoutReused"] = json!(reused);
         Self::from_layout(source, meta)
     }
     pub(crate) fn from_layout(source: &str, meta: Value) -> Result<Self> {

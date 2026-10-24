@@ -146,7 +146,7 @@ impl Service {
         let pid = sysinfo::Pid::from_u32(std::process::id());
         system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
         let rss = system.process(pid).map(|p| p.memory());
-        json!({"service":"cf-gateway-rust","version":crate::version::VERSION,"buildId":crate::version::build_id(),"mode":"pure-algorithm","precomputedEnvironmentProfile":false,"strictPureAlgorithmAcceptance":stats.strict,"uptimeSeconds":self.started.elapsed().as_secs(),"requests":stats.total,"active":stats.active,"success":stats.success,"failed":stats.failed,"runtime":{"language":"Rust","python":null,"rustEnabled":true,"rssBytes":rss,"sessions":sessions,"verifiedReadConcurrency":4,"responseCache":false,"defaultMode":"relay","networkMode":self.network.mode,"dnsMode":self.network.dns_mode(),"dohEnabled":self.network.doh,"dohUrl":if self.network.doh {Some(self.network.doh_url.as_str())}else{None}},"recent":stats.recent,"sessionDetails":session_details,"capabilities":{"nativeHttp":true,"managedChallenge":"native-rust-protocol","turnstile":"native-finite-recipes","jsdOneshot":"experimental"}})
+        json!({"service":"cf-gateway-rust","version":crate::version::VERSION,"buildId":crate::version::build_id(),"mode":"pure-algorithm","precomputedEnvironmentProfile":false,"strictPureAlgorithmAcceptance":stats.strict,"uptimeSeconds":self.started.elapsed().as_secs(),"requests":stats.total,"active":stats.active,"success":stats.success,"failed":stats.failed,"runtime":{"language":"Rust","python":null,"rustEnabled":true,"rssBytes":rss,"sessions":sessions,"verifiedReadConcurrency":4,"cpuWorkerLimit":crate::cpu::limit(),"responseCache":false,"defaultMode":"relay","networkMode":self.network.mode,"dnsMode":self.network.dns_mode(),"dohEnabled":self.network.doh,"dohUrl":if self.network.doh {Some(self.network.doh_url.as_str())}else{None}},"recent":stats.recent,"sessionDetails":session_details,"capabilities":{"nativeHttp":true,"managedChallenge":"native-rust-protocol","turnstile":"native-finite-recipes","jsdOneshot":"experimental"}})
     }
     pub fn history(&self) -> Value {
         let stats = self.stats.lock().unwrap();
@@ -467,6 +467,10 @@ fn annotate_timeout(mut error: Error, stage: &Value) -> Error {
     if error.code == "TIMEOUT" && error.details.is_null() {
         error.details = json!({"stage":stage,"source":"network"});
     }
+    if error.code == "TIMEOUT" && error.details.is_object() && error.details.get("stage").is_none()
+    {
+        error.details["stage"] = stage.clone();
+    }
     error
 }
 fn image_type(response: &crate::network::HttpResponse) -> Result<&'static str> {
@@ -592,6 +596,11 @@ mod regression {
         existing.details = json!({"stage":"frame-work"});
         let existing = annotate_timeout(existing, &json!("verifyingAndFetching"));
         assert_eq!(existing.details["stage"], "frame-work");
+        let mut cpu = Error::new("TIMEOUT", "fixture");
+        cpu.details = json!({"source":"cpu"});
+        let cpu = annotate_timeout(cpu, &json!("verifyingAndFetching"));
+        assert_eq!(cpu.details["source"], "cpu");
+        assert_eq!(cpu.details["stage"], "verifyingAndFetching");
     }
     #[test]
     fn final_target_retry_requires_managed_get_fallback_403() {

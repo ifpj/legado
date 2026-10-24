@@ -98,6 +98,7 @@ pub fn calculate(c: &Context<'_>, results: &mut Results) -> Result<()> {
         }
     });
     for m in &c.catalog.modules {
+        crate::cpu::check()?;
         let entered = epoch_ms();
         let literals = c.response.between(m.start, m.end);
         let values: HashSet<_> = literals.iter().map(|l| l.value.as_str()).collect();

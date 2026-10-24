@@ -134,6 +134,7 @@ impl<'a> Tables<'a> {
         &self.source[n.byte_range()]
     }
     pub fn new(root: Node<'a>, source: &'a str) -> Result<Self> {
+        crate::cpu::check()?;
         let nodes = walk(root, true);
         let positions = nodes
             .iter()
@@ -167,6 +168,7 @@ impl<'a> Tables<'a> {
             }
         }
         t.recover()?;
+        crate::cpu::check()?;
         t.scopes.borrow_mut().clear();
         Ok(t)
     }
@@ -267,6 +269,7 @@ impl<'a> Tables<'a> {
         self.eval(n, &mut self.scope(n))
     }
     pub fn evaluate(&self, n: Node<'a>, env: &mut Env<'a>, depth: usize) -> Result<Constant<'a>> {
+        crate::cpu::check()?;
         let count = self.steps.get() + 1;
         self.steps.set(count);
         require(count <= 2000 && depth <= 40, "Static expression budget")?;
@@ -641,9 +644,11 @@ impl<'a> Tables<'a> {
         Err(unknown("Wrapper has no return"))
     }
     fn recover(&mut self) -> Result<()> {
+        crate::cpu::check()?;
         let all = self.nodes.clone();
         let mut factories = Vec::new();
         for node in &all {
+            crate::cpu::check()?;
             if node.kind() != "call_expression" {
                 continue;
             }
@@ -797,6 +802,7 @@ impl<'a> Tables<'a> {
                 }
             }
             for rotation in candidates {
+                crate::cpu::check()?;
                 self.rotation.set(rotation);
                 if self
                     .eval(expression, &mut local.clone())
@@ -847,6 +853,9 @@ impl<'a> Tables<'a> {
         Ok(())
     }
     pub fn scope(&self, node: Node<'a>) -> Env<'a> {
+        if crate::cpu::stopped() {
+            return Env::new();
+        }
         let mut parent = node.parent();
         while parent.is_some_and(|p| {
             !matches!(
@@ -927,6 +936,9 @@ impl<'a> Tables<'a> {
         // recursively rebuilding an unfinished scope.
         self.scopes.borrow_mut().insert(parent.id(), local.clone());
         for n in rows {
+            if crate::cpu::stopped() {
+                return Env::new();
+            }
             if !matches!(n.kind(), "assignment_expression" | "variable_declarator") {
                 continue;
             }

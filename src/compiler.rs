@@ -729,14 +729,15 @@ pub(crate) fn recover_material(encoded: &str, f: &Format, names: &HashSet<&str>)
 }
 pub fn compile(source: &str, frame: bool) -> Result<Plan> {
     let prepared = crate::literal_strings::prepare(source)?;
-    let source = prepared.as_ref();
+    compile_prepared(prepared.as_ref(), frame)
+}
+pub(crate) fn compile_prepared(source: &str, frame: bool) -> Result<Plan> {
+    crate::cpu::check()?;
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_javascript::LANGUAGE.into())
         .map_err(|e| Error::new("PARSER_ERROR", e.to_string()))?;
-    let tree = parser
-        .parse(source, None)
-        .ok_or_else(|| Error::new("PARSER_ERROR", "Script parse failed"))?;
+    let tree = crate::cpu::parse(&mut parser, source)?;
     require(
         !tree.root_node().has_error(),
         "Challenge syntax unsupported",
@@ -761,6 +762,7 @@ pub fn compile(source: &str, frame: bool) -> Result<Plan> {
     let mut programs = Vec::new();
     let mut material_errors = Vec::new();
     for value in &values {
+        crate::cpu::check()?;
         if value.len() > 64 && re(r"^[A-Za-z0-9+/]+={0,2}$").is_match(value) {
             if let Ok(raw) = STANDARD.decode(value) {
                 if let Ok(p) = program(&raw, &f, false) {
@@ -807,6 +809,7 @@ pub fn compile(source: &str, frame: bool) -> Result<Plan> {
             json!([meta["dispatcher_profile"]["opcode"], vec![0; 25], {}]);
         meta["declared_properties"] = declarations(&tables)?;
     }
+    crate::cpu::check()?;
     Ok(Plan {
         format: f,
         meta,

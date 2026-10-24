@@ -10,6 +10,14 @@ use std::{collections::HashSet, time::Instant};
 fn failure(e: impl std::fmt::Display) -> Error {
     Error::new("BENCHMARK_ERROR", e.to_string())
 }
+struct EpochTicker(Option<tokio::task::JoinHandle<()>>);
+impl Drop for EpochTicker {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
 pub fn run(
     code: &[u8],
     order: [i32; 4],
@@ -33,7 +41,11 @@ pub fn run(
     )?;
     let started = Instant::now();
     let mut config = wasmtime::Config::new();
-    config.consume_fuel(true).wasm_simd(true);
+    crate::cpu::check()?;
+    config
+        .consume_fuel(true)
+        .wasm_simd(true)
+        .epoch_interruption(true);
     let engine = wasmtime::Engine::new(&config).map_err(failure)?;
     let module = wasmtime::Module::new(&engine, code).map_err(failure)?;
     require(
@@ -52,6 +64,20 @@ pub fn run(
         .memories(1)
         .build();
     let mut store = wasmtime::Store::new(&engine, limits);
+    let _ticker = EpochTicker(tokio::runtime::Handle::try_current().ok().map(|runtime| {
+        let engine = engine.clone();
+        runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                engine.increment_epoch();
+            }
+        })
+    }));
+    store.set_epoch_deadline(1);
+    store.epoch_deadline_callback(|_| {
+        crate::cpu::check().map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+        Ok(wasmtime::UpdateDeadline::Continue(1))
+    });
     store.limiter(|limits| limits);
     store.set_fuel(2_000_000_000).map_err(failure)?;
     let instance = wasmtime::Instance::new(&mut store, &module, &[]).map_err(failure)?;
@@ -60,6 +86,7 @@ pub fn run(
     let timed = Instant::now();
     for _ in 0..repeats {
         for (index, function) in order.iter().enumerate() {
+            crate::cpu::check()?;
             let name = ["a", "b", "c", "d"][*function as usize];
             let call = instance
                 .get_func(&mut store, name)
@@ -93,6 +120,7 @@ pub fn run(
 }
 pub fn calculate(c: &Context<'_>, results: &mut Results) -> Result<()> {
     for m in &c.catalog.modules {
+        crate::cpu::check()?;
         let entered = epoch_ms();
         let literals = c.response.between(m.start, m.end);
         let values: HashSet<_> = literals.iter().map(|l| l.value.as_str()).collect();

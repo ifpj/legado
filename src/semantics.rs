@@ -463,6 +463,7 @@ pub(crate) fn recipe(integer: u32, regexp: &str, values: &HashSet<&str>) -> Resu
 }
 pub fn calculate(c: &Context<'_>, results: &mut Results) -> Result<()> {
     for m in &c.catalog.modules {
+        crate::cpu::check()?;
         let entered = epoch_ms();
         let values: HashSet<_> = c
             .response
@@ -506,6 +507,7 @@ pub fn callbacks(c: &Context<'_>, results: &mut Results) -> Result<()> {
     let mut candidates = Vec::new();
     let last = c.catalog.modules.iter().map(|m| m.start).max().unwrap_or(0);
     for m in &c.catalog.modules {
+        crate::cpu::check()?;
         if results.fields.contains_key(&m.id) {
             continue;
         }
