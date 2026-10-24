@@ -283,6 +283,12 @@ pub(crate) fn environment(
     connection: &Value,
     pdf_viewer: bool,
 ) -> Result<Option<(&'static str, Value)>> {
+    // A complete page-view recipe owns this module even if the literal scan
+    // also recovers a generic error field name from its instruction bytes.
+    // The one-field environment signatures must not preempt that recipe.
+    if has(values, &["BdOzr6", "Nihv6", "UqEc2", "kKOzy9"]) {
+        return Ok(None);
+    }
     let signatures: &[(&[&str], &str)] = &[
         (
             &["iOxd5", "gKCe1", "saveData", "effectiveType"],
@@ -583,4 +589,95 @@ pub(crate) fn console_recipe(
     let mut sorted = literals;
     sorted.sort_by_key(|l| l.start);
     Ok(Some(console(&sorted)?))
+}
+
+#[cfg(test)]
+mod task_ownership_regression {
+    use super::*;
+    use crate::{
+        catalog::Module,
+        data::{Format, Literal, Program},
+    };
+
+    #[test]
+    fn complete_page_view_recipe_wins_over_incidental_error_field() {
+        let names = ["BdOzr6", "Nihv6", "UqEc2", "kKOzy9", "KOmHB7"];
+        let response = Response {
+            raw: vec![],
+            program: Program {
+                sha256: String::new(),
+                byte_length: 0,
+                code_length: 0,
+                strings: vec![],
+            },
+            literals: names
+                .iter()
+                .enumerate()
+                .map(|(i, s)| Literal {
+                    key: None,
+                    start: i,
+                    end: i + 1,
+                    value: (*s).into(),
+                    packed: None,
+                    continuation: 0,
+                    pool_offset: 0,
+                })
+                .collect(),
+            packed: vec![],
+        };
+        let plan = Plan {
+            format: Format {
+                byte_offset: 0,
+                initial_key: 0,
+                state_step: 0,
+                state_multiplier: 0,
+                state_increment: 0,
+                hash_salt: 0,
+                char_xor: 0,
+                state_quadratic: 0,
+                char_mode: "after-subtract".into(),
+                opcode_multiplier: None,
+            },
+            meta: json!({}),
+            alphabet: String::new(),
+            modulus: String::new(),
+            flow: String::new(),
+        };
+        let catalog = Catalog {
+            parameters: json!({}),
+            modules: vec![Module {
+                id: "page".into(),
+                data: String::new(),
+                label: "page".into(),
+                start: 0,
+                end: names.len(),
+                metadata: 0,
+            }],
+            targets: vec![],
+            order: vec![],
+        };
+        let result = calculate(&Context {
+            response: &response,
+            plan: &plan,
+            catalog: &catalog,
+            html: "",
+            parent_html: "",
+            frame_url: "https://challenges.cloudflare.com/",
+            page_url: "https://twkan.com/txt/1/1",
+            mode: "managed",
+        })
+        .unwrap();
+        assert_eq!(result.kinds, vec!["native-html-declared-page-view"]);
+        assert!(result.fields["page"].get("iukR9").is_some());
+        assert!(result.fields["page"].get("KOmHB7").is_none());
+        let facts = Facts::read("").unwrap();
+        let error_only = HashSet::from(["KOmHB7"]);
+        assert_eq!(
+            environment(&error_only, &facts, &facts, &json!({}), true)
+                .unwrap()
+                .unwrap()
+                .0,
+            "code-point-error"
+        );
+    }
 }

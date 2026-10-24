@@ -74,6 +74,94 @@ mod tests {
             [99, 126]
         );
     }
+    #[test]
+    fn module_local_authenticated_operands_are_excluded_with_table_operands() {
+        let format = data::Format {
+            byte_offset: 0,
+            initial_key: 0,
+            state_step: 10,
+            state_multiplier: 1,
+            state_increment: 1,
+            hash_salt: 0,
+            char_xor: 0,
+            state_quadratic: 0,
+            char_mode: "before-subtract".into(),
+            opcode_multiplier: None,
+        };
+        let plan = Plan {
+            format,
+            meta: json!({"dispatcher_profile": {
+                "opcode":20,"fnv_seed":100,"prefix":[1,2,3],
+                "hash_slots":[0,1,2,3],"digest_slots":[0,1,2,3],
+                "target_slots":[5,6,7],"key_slot":8,"key_mask":0
+            }}),
+            alphabet: String::new(),
+            modulus: String::new(),
+            flow: String::new(),
+        };
+        let literal = |start, value: String| Literal {
+            key: None,
+            start,
+            end: start + 5,
+            value,
+            packed: None,
+            continuation: 0,
+            pool_offset: 0,
+        };
+        let mut response = Response {
+            raw: vec![0; 6000],
+            program: data::Program {
+                sha256: String::new(),
+                byte_length: 6000,
+                code_length: 6000,
+                strings: vec![],
+            },
+            literals: vec![],
+            packed: vec![],
+        };
+        for i in 0..34 {
+            let name = format!("State{i}");
+            let at = if i < 32 {
+                100 + i * 30
+            } else {
+                4000 + (i - 32) * 500
+            };
+            let mut input = vec![1, 2, 3];
+            input.extend(name.encode_utf16().flat_map(u16::to_be_bytes));
+            let digest = blake3::hash(&input);
+            let digest = digest.as_bytes();
+            let tail = u32::from_be_bytes(digest[28..].try_into().unwrap());
+            response.raw[at] = 20;
+            let key = plan.format.key(0, 20);
+            let hash = state_hash(&name, 100).to_be_bytes();
+            for (offset, byte) in hash.iter().enumerate() {
+                response.raw[at + 1 + offset] = byte ^ key;
+            }
+            let target = (123 ^ (tail >> 8)).to_be_bytes();
+            for (offset, byte) in target[1..].iter().enumerate() {
+                response.raw[at + 6 + offset] = byte ^ key;
+            }
+            for (offset, byte) in digest[..16].iter().enumerate() {
+                response.raw[at + 10 + offset] = byte ^ key;
+            }
+            if i == 33 {
+                response.raw[at + 10] ^= 1;
+            }
+            response.literals.push(literal(5000 + i * 10, name));
+        }
+        response.literals.extend([
+            literal(4015, "RTCRtpReceiver".into()),
+            literal(4515, "trustedTypes".into()),
+        ]);
+        let descriptors = authenticated_targets(&response, &plan).unwrap();
+        assert_eq!(descriptors.len(), 33);
+        let table = select_state_table(descriptors.clone()).unwrap();
+        assert_eq!(table.len(), 32);
+        assert!(table.iter().all(|t| t.at < 4000));
+        exclude_descriptor_operands(&mut response.literals, &descriptors);
+        assert!(!response.literals.iter().any(|l| l.start == 4015));
+        assert!(response.literals.iter().any(|l| l.start == 4515));
+    }
 }
 
 impl Response {
@@ -148,6 +236,9 @@ pub(crate) fn state_hash(name: &str, seed: u32) -> u32 {
         .fold(seed, |a, b| (a ^ b as u32).wrapping_mul(16777619))
 }
 pub fn state_targets(response: &Response, plan: &Plan) -> Result<Vec<Target>> {
+    select_state_table(authenticated_targets(response, plan)?)
+}
+fn authenticated_targets(response: &Response, plan: &Plan) -> Result<Vec<Target>> {
     require(
         response.program.code_length >= 26
             && response.program.code_length <= 512 * 1024
@@ -228,6 +319,9 @@ pub fn state_targets(response: &Response, plan: &Plan) -> Result<Vec<Target>> {
             }
         }
     }
+    Ok(found)
+}
+fn select_state_table(found: Vec<Target>) -> Result<Vec<Target>> {
     let mut groups = Vec::<Vec<Target>>::new();
     for item in found {
         if groups
@@ -254,7 +348,8 @@ pub fn state_targets(response: &Response, plan: &Plan) -> Result<Vec<Target>> {
 }
 impl Catalog {
     pub fn read(response: &mut Response, plan: &Plan) -> Result<Self> {
-        let targets = state_targets(response, plan)?;
+        let descriptors = authenticated_targets(response, plan)?;
+        let targets = select_state_table(descriptors.clone())?;
         let names: HashSet<_> = targets
             .iter()
             .map(|t| t.name.as_str())
@@ -271,7 +366,9 @@ impl Catalog {
             }
         }
         response.literals.sort_by_key(|l| l.start);
-        exclude_descriptor_operands(&mut response.literals, &targets);
+        // Module-local descriptors have the same authenticated operand layout
+        // as the main table, even though they are not table entries.
+        exclude_descriptor_operands(&mut response.literals, &descriptors);
         let mut result = Self::link(response, response.frame()?, targets)?;
         result.order = result.registration_order(response)?;
         Ok(result)

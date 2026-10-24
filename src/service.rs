@@ -255,6 +255,7 @@ impl Service {
             started: start,
             completed: false,
         };
+        let mut retry_first_error = None;
         let outcome = tokio::time::timeout_at(deadline.into(), async {
             let mut cached = None;
             loop {
@@ -326,10 +327,15 @@ impl Service {
                     .engine
                     .run(session.clone(), url, deadline, analyze, response)
                     .await;
-                // Never replay a rejected continuation. Allow one fresh round
-                // under the original total deadline and exclusive gate.
-                if !analyze && retry_continuation(&result, deadline) {
+                // Never replay rejected protocol data. Allow one fresh round
+                // only for the two observed rejection shapes, under
+                // the original total deadline and exclusive gate.
+                if !analyze
+                    && (retry_continuation(&result, deadline)
+                        || retry_final_target_get_403(&result, deadline))
+                {
                     let first = result.as_ref().err().unwrap().reply();
+                    retry_first_error = Some(first.clone());
                     result = self
                         .engine
                         .run(session.clone(), url, deadline, false, None)
@@ -356,9 +362,10 @@ impl Service {
         })
         .await
         .unwrap_or_else(|_| {
-            let mut e = Error::new("TIMEOUT", "请求总时限已用完");
-            e.status = 504;
-            Err(e)
+            Err(total_deadline_error(
+                &active.record["stage"],
+                retry_first_error.as_ref(),
+            ))
         });
         let outcome = outcome.and_then(|(outcome, queue)| {
             if image {
@@ -430,8 +437,30 @@ fn retry_continuation(result: &Result<crate::engine::Outcome>, deadline: Instant
         && result.as_ref().err().is_some_and(|e| {
             e.code == "MANAGED_CONTINUATION_REJECTED"
                 && e.details["status"] == 400
-                && e.details["stage"] == "frame-tasks"
+                && matches!(
+                    e.details["stage"].as_str(),
+                    Some("frame-tasks" | "frame-work")
+                )
         })
+}
+fn retry_final_target_get_403(result: &Result<crate::engine::Outcome>, deadline: Instant) -> bool {
+    Instant::now() < deadline
+        && result.as_ref().err().is_some_and(|e| {
+            e.code == "NATIVE_CHALLENGE_NOT_SOLVED"
+                && e.details["stage"] == "final-target"
+                && e.details["status"] == 403
+                && e.details["challenge"] == "managed"
+                && e.details["details"]["firstFlow"]["finalNavigation"]["method"] == "GET"
+        })
+}
+fn total_deadline_error(stage: &Value, first_error: Option<&Value>) -> Error {
+    let mut error = Error::new("TIMEOUT", "请求总时限已用完");
+    error.status = 504;
+    error.details = json!({"stage":stage});
+    if let Some(first) = first_error {
+        error.details["freshRoundRetry"] = json!({"attempts":2,"firstError":first});
+    }
+    error
 }
 fn image_type(response: &crate::network::HttpResponse) -> Result<&'static str> {
     let b = &response.content;
@@ -498,6 +527,22 @@ mod regression {
             &make("MANAGED_CONTINUATION_REJECTED", 400, "frame-tasks"),
             future
         ));
+        assert!(retry_continuation(
+            &make("MANAGED_CONTINUATION_REJECTED", 400, "frame-work"),
+            future
+        ));
+        assert!(!retry_continuation(
+            &make("MANAGED_CONTINUATION_REJECTED", 400, "frame-first"),
+            future
+        ));
+        assert!(!retry_continuation(
+            &make("MANAGED_CONTINUATION_REJECTED", 429, "frame-work"),
+            future
+        ));
+        assert!(!retry_continuation(
+            &make("CHILD_CHALLENGE_REJECTED", 400, "frame-work"),
+            future
+        ));
         assert!(!retry_continuation(
             &make("MANAGED_CONTINUATION_REJECTED", 400, "frame-tasks"),
             Instant::now()
@@ -513,6 +558,53 @@ mod regression {
         assert!(!retry_continuation(
             &make("UPSTREAM_ERROR", 400, "frame-tasks"),
             future
+        ));
+    }
+    #[test]
+    fn outer_deadline_preserves_the_first_continuation_rejection() {
+        let first = json!({"code":"MANAGED_CONTINUATION_REJECTED","details":{"stage":"frame-work","status":400}});
+        let error = total_deadline_error(&json!("verifyingAndFetching"), Some(&first));
+        assert_eq!(error.code, "TIMEOUT");
+        assert_eq!(error.status, 504);
+        assert_eq!(error.details["stage"], "verifyingAndFetching");
+        assert_eq!(error.details["freshRoundRetry"]["attempts"], 2);
+        assert_eq!(error.details["freshRoundRetry"]["firstError"], first);
+        let waiting = total_deadline_error(&json!("waitingForReadSlot"), None);
+        assert_eq!(waiting.details["stage"], "waitingForReadSlot");
+        assert!(waiting.details.get("freshRoundRetry").is_none());
+    }
+    #[test]
+    fn final_target_retry_requires_managed_get_fallback_403() {
+        let make = |code: &str, status: u16, challenge: &str, method: &str| {
+            let mut e = Error::new(code, "fixture");
+            e.details = json!({
+                "stage":"final-target",
+                "status":status,
+                "challenge":challenge,
+                "details":{"firstFlow":{"finalNavigation":{"method":method}}}
+            });
+            Err(e)
+        };
+        let future = Instant::now() + Duration::from_secs(1);
+        assert!(retry_final_target_get_403(
+            &make("NATIVE_CHALLENGE_NOT_SOLVED", 403, "managed", "GET"),
+            future
+        ));
+        assert!(!retry_final_target_get_403(
+            &make("NATIVE_CHALLENGE_NOT_SOLVED", 403, "managed", "POST"),
+            future
+        ));
+        assert!(!retry_final_target_get_403(
+            &make("NATIVE_CHALLENGE_NOT_SOLVED", 403, "blocked", "GET"),
+            future
+        ));
+        assert!(!retry_final_target_get_403(
+            &make("NATIVE_CHALLENGE_NOT_SOLVED", 429, "managed", "GET"),
+            future
+        ));
+        assert!(!retry_final_target_get_403(
+            &make("NATIVE_CHALLENGE_NOT_SOLVED", 403, "managed", "GET"),
+            Instant::now()
         ));
     }
     #[test]

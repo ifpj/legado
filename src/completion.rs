@@ -7,11 +7,18 @@ use crate::{
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+fn child_rejected() -> crate::Error {
+    crate::Error {
+        code: "CHILD_CHALLENGE_REJECTED".into(),
+        message: "验证组件返回失败结果".into(),
+        status: 422,
+        details: json!({"stage":"frame-completion","outcome":"fail"}),
+    }
+}
 fn embedded_token(values: &[&str]) -> Result<String> {
-    require(
-        !values.contains(&"fail"),
-        "Embedded widget returned failure",
-    )?;
+    if values.contains(&"fail") {
+        return Err(child_rejected());
+    }
     // The standalone complete message contains both token and sToken. They
     // have the same lexical shape; only the value bound to event=complete is
     // the site's verification token. Never select an arbitrary opaque string.
@@ -57,6 +64,40 @@ mod embedded_completion_tests {
         ])
         .is_err());
     }
+    #[test]
+    fn explicit_child_rejection_is_distinct_from_an_unknown_format() {
+        let error = embedded_token(&["fail"]).unwrap_err();
+        assert_eq!(error.code, "CHILD_CHALLENGE_REJECTED");
+        assert_eq!(error.details["stage"], "frame-completion");
+        assert_eq!(error.details["outcome"], "fail");
+        let response = Response {
+            raw: vec![],
+            program: data::Program {
+                sha256: String::new(),
+                byte_length: 0,
+                code_length: 0,
+                strings: vec![],
+            },
+            literals: vec![data::Literal {
+                key: None,
+                start: 0,
+                end: 4,
+                value: "fail".into(),
+                packed: None,
+                continuation: 0,
+                pool_offset: 0,
+            }],
+            packed: vec![],
+        };
+        assert_eq!(
+            response.completion().unwrap_err().code,
+            "CHILD_CHALLENGE_REJECTED"
+        );
+        assert_eq!(
+            response.widget_completion().unwrap_err().code,
+            "CHILD_CHALLENGE_REJECTED"
+        );
+    }
 }
 
 impl Response {
@@ -66,7 +107,9 @@ impl Response {
     }
     pub fn completion(&self) -> Result<Value> {
         let values: HashSet<_> = self.literals.iter().map(|l| l.value.as_str()).collect();
-        require(!values.contains("fail"), "Child challenge returned failure")?;
+        if values.contains("fail") {
+            return Err(child_rejected());
+        }
         Ok(
             json!({"widgetToken":data::one(values.iter().filter(|v|(100..=16384).contains(&v.len())&&re(r"^1\.[A-Za-z0-9_.-]+$").is_match(v)).copied())?,"parentState":data::one(values.iter().filter(|v|v.len()<=16384&&data::token(v)&&v.contains("-1.3.1.1-")).copied())?}),
         )

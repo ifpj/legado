@@ -381,7 +381,7 @@ impl Engine {
                 "NATIVE_CHALLENGE_NOT_SOLVED",
                 "提交后独立复查仍未取得目标页面",
                 422,
-                json!({"status":next.status,"challenge":checked.kind,"details":details}),
+                json!({"stage":"final-target","status":next.status,"challenge":checked.kind,"details":details}),
             ));
         }
         Err(Error::new("CHALLENGE_REDIRECT_LIMIT", "网站验证跳转过多"))
@@ -524,6 +524,7 @@ impl Engine {
                 .await?;
             nav = completion::navigation(&complete, p, config, &page.url)?;
         }
+        let navigation_method = if nav.is_some() { "POST" } else { "GET" };
         let checked = if let Some(Navigation { url, body }) = nav {
             s.request(
                 "POST",
@@ -548,10 +549,11 @@ impl Engine {
         } else {
             checked
         };
+        let checked_status = checked.status;
         self.capture(&checked.content, ".verification.html")?;
         Ok((
             checked,
-            json!({"nextStage":"native-parent-submitted","frameInitialization":summary}),
+            json!({"nextStage":"native-parent-submitted","frameInitialization":summary,"finalNavigation":{"method":navigation_method,"status":checked_status}}),
         ))
     }
     async fn frame(
