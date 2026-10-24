@@ -411,6 +411,7 @@ impl Service {
                 Ok((value, bytes))
             }
             Err(error) => {
+                let error = annotate_timeout(error, &active.record["stage"]);
                 record["ok"] = json!(false);
                 record["code"] = json!(error.code);
                 record["error"] = json!(error.message);
@@ -459,6 +460,12 @@ fn total_deadline_error(stage: &Value, first_error: Option<&Value>) -> Error {
     error.details = json!({"stage":stage});
     if let Some(first) = first_error {
         error.details["freshRoundRetry"] = json!({"attempts":2,"firstError":first});
+    }
+    error
+}
+fn annotate_timeout(mut error: Error, stage: &Value) -> Error {
+    if error.code == "TIMEOUT" && error.details.is_null() {
+        error.details = json!({"stage":stage,"source":"network"});
     }
     error
 }
@@ -572,6 +579,19 @@ mod regression {
         let waiting = total_deadline_error(&json!("waitingForReadSlot"), None);
         assert_eq!(waiting.details["stage"], "waitingForReadSlot");
         assert!(waiting.details.get("freshRoundRetry").is_none());
+    }
+    #[test]
+    fn network_timeout_preserves_the_active_stage() {
+        let error = annotate_timeout(
+            Error::new("TIMEOUT", "fixture"),
+            &json!("verifyingAndFetching"),
+        );
+        assert_eq!(error.details["stage"], "verifyingAndFetching");
+        assert_eq!(error.details["source"], "network");
+        let mut existing = Error::new("TIMEOUT", "fixture");
+        existing.details = json!({"stage":"frame-work"});
+        let existing = annotate_timeout(existing, &json!("verifyingAndFetching"));
+        assert_eq!(existing.details["stage"], "frame-work");
     }
     #[test]
     fn final_target_retry_requires_managed_get_fallback_403() {

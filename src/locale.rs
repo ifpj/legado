@@ -176,10 +176,39 @@ pub(crate) fn operands(
     let i = lists[0];
     let text = &literals[i + 1].value;
     let separator = &literals[i + 2].value;
-    require(
-        re(r"^[A-Za-z0-9]{3,512}$").is_match(text) && re(r"^[A-Za-z]$").is_match(separator),
-        "Locale list format",
-    )?;
+    let text_bytes = (3..=512).contains(&text.len());
+    let text_chars = (1..=512).contains(&text.chars().count());
+    let text_safe = text_bytes && text_chars && !text.chars().any(char::is_control);
+    let separator_chars = (1..=8).contains(&separator.chars().count());
+    let separator_bytes = (1..=32).contains(&separator.len());
+    let separator_safe =
+        separator_chars && separator_bytes && !separator.chars().any(char::is_control);
+    if !text_safe || !separator_safe {
+        let mut error = Error::new("UNSUPPORTED_FORMAT", "Locale list format");
+        let split_count = (!separator.is_empty()).then(|| text.split(separator).count());
+        error.details = json!({
+            "textBytes": text.len(),
+            "textChars": text.chars().count(),
+            "textByteBounded": text_bytes,
+            "textCharBounded": text_chars,
+            "textHasNonAscii": !text.is_ascii(),
+            "textHasControl": text.chars().any(char::is_control),
+            "textHasWhitespace": text.chars().any(char::is_whitespace),
+            "textHasSeparator": !separator.is_empty() && text.contains(separator),
+            "textSplitCount": split_count,
+            "textHash": blake3::hash(text.as_bytes()).to_hex().to_string(),
+            "separatorBytes": separator.len(),
+            "separatorChars": separator.chars().count(),
+            "separatorByteBounded": separator_bytes,
+            "separatorCharBounded": separator_chars,
+            "separatorHasControl": separator.chars().any(char::is_control),
+            "separatorCodePoint": separator.chars().next().map(|c| c as u32),
+            "separatorHash": blake3::hash(separator.as_bytes()).to_hex().to_string(),
+            "literalCount": literals.len(),
+            "listIndex": i,
+        });
+        return Err(error);
+    }
     let words = text.split(separator).map(String::from).collect::<Vec<_>>();
     require(
         (1..=8).contains(&words.len())
@@ -230,5 +259,41 @@ mod tests {
         ] {
             assert!(format(locale, zone, time, language, &list, number).is_err());
         }
+    }
+
+    #[test]
+    fn locale_list_operands_allow_punctuation_and_unicode_values() {
+        let values = [
+            "timeZoneName",
+            "long",
+            "anchor",
+            "compactDisplay",
+            "long",
+            "anchor2",
+            "eo-UA",
+            "disjunction",
+            "one，二",
+            "，",
+        ];
+        let literals = values
+            .iter()
+            .enumerate()
+            .map(|(start, value)| crate::data::Literal {
+                key: None,
+                start: start * 10,
+                end: start * 10 + 1,
+                value: (*value).into(),
+                packed: None,
+                continuation: 0,
+                pool_offset: 0,
+            })
+            .collect::<Vec<_>>();
+        let input = literals.iter().collect::<Vec<_>>();
+        let (timestamp, amount, language, words) =
+            operands(&input, &[(15, 1e12), (45, 1e16)]).unwrap();
+        assert_eq!(timestamp, 1e12);
+        assert_eq!(amount, 1e16);
+        assert_eq!(language, "eo-UA");
+        assert_eq!(words, ["one", "二"]);
     }
 }
