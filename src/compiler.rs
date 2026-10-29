@@ -1170,6 +1170,15 @@ pub(crate) fn current_sealed(source: &str, previous: Option<&tree_sitter::Tree>)
     }
     sealed::profile(&Tables::new(tree.root_node(), source)?)
 }
+/// Reads the sealed key from the original syntax tree without the decoded
+/// literal pass or the complete constant recovery fallback.
+pub(crate) fn current_sealed_original(source: &str, tree: &tree_sitter::Tree) -> Result<Value> {
+    require(
+        !tree.root_node().has_error(),
+        "Challenge syntax unsupported",
+    )?;
+    sealed::profile(&Tables::syntax(tree.root_node(), source)?)
+}
 pub(crate) fn constant_json(v: Constant<'_>) -> Option<Value> {
     match v {
         Constant::Number(n) => serde_json::Number::from_f64(n).map(Value::Number),

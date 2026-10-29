@@ -56,12 +56,52 @@ fn protocol_error(code: &str, message: &str, status: u16, details: Value) -> Err
 pub fn initial(config: &Value, locale: &str) -> Value {
     json!({"TawNq4":config["cType"],"QZAb2":config["cvId"],"UqwKl5":0,"gRYZ0":0,"Pzgs5":"OoGu5","URVD0":0,"shUar7":0,"ghqno0":0,"pKaqh3":1,"RUtA1":config["cITimeS"],"MsSIK5":config["md"],"YVDgD5":config["cTplC"]==1,"nTlR0":{"frLR7":0,"WxIBU1":0,"rRfi2":0,"XWXu1":0,"Mfpwg0":0,"GCgUo2":0,"GkCb5":0,"gmGY7":0},"CtUv5":false,"TKcX8":false,"iWlWL9":"iDQN3","CAHKN0":"","vvfHL3":"[]","bkOl5":0,"gfOgY8":"tQth1","Bxtcq6":locale,"lffN9":"qCZq4","BuWQ0":{"LQfqz0":"chejv1"}})
 }
+/// The managed component is always loaded from this origin.
+const FRAME_ORIGIN: &str = "https://challenges.cloudflare.com/";
+/// Component task hosts seen in earlier verifications. They are connection
+/// hints only: every task URL is still read from the current program, and an
+/// unused early connection is dropped without sending TLS or HTTP data.
+static TASK_HOSTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+fn learn_task_hosts(tasks: &[crate::http_tasks::Task]) {
+    let mut hosts = TASK_HOSTS.lock().unwrap();
+    for task in tasks {
+        let Some(host) = url::Url::parse(&task.url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        else {
+            continue;
+        };
+        if host != "challenges.cloudflare.com"
+            && re(r"^[a-z0-9-]{1,63}\.challenges\.cloudflare\.com$").is_match(&host)
+        {
+            hosts.retain(|h| *h != host);
+            hosts.insert(0, host);
+            hosts.truncate(2);
+        }
+    }
+}
+fn learned_task_hosts() -> Vec<String> {
+    TASK_HOSTS.lock().unwrap().clone()
+}
 async fn plan(
     source: Document,
     deadline: Instant,
     defer: bool,
 ) -> Result<(Arc<Plan>, Option<PendingSealed>)> {
-    crate::cpu::run(deadline, move || {
+    // Parse once, then read the current key from the original tree while
+    // literals are decoded. The first response still waits for the check.
+    let early = if defer && source.contains("atob") && source.contains("fromCharCode.apply") {
+        let parsed = source.clone();
+        crate::cpu::run(deadline, move || parsed.syntax().map(|_| ())).await?;
+        let original = source.clone();
+        Some(tokio::spawn(crate::cpu::run(deadline, move || {
+            crate::compiler::current_sealed_original(&original, original.syntax()?)
+        })))
+    } else {
+        None
+    };
+    let early = crate::data::EarlySealed::from(early);
+    let planned = crate::cpu::run(deadline, move || {
         (if defer {
             let tree = if source.contains("atob") && source.contains("fromCharCode.apply") {
                 Some(source.syntax()?)
@@ -74,7 +114,11 @@ async fn plan(
         })
         .map(|(p, v)| (Arc::new(p), v))
     })
-    .await
+    .await?;
+    Ok((
+        planned.0,
+        planned.1.map(|pending| pending.with_early(early)),
+    ))
 }
 async fn validated_response<T>(
     request: impl std::future::Future<Output = Result<T>>,
@@ -193,7 +237,7 @@ impl Engine {
         };
         let validation = async move {
             if let Some(validation) = validation {
-                crate::cpu::run(deadline, move || validation.validate()).await?;
+                validation.check(deadline).await?;
             }
             Ok(())
         };
@@ -352,6 +396,11 @@ impl Engine {
                 });
             }
             self.capture(&current.content, ".html")?;
+            if challenge.config["cType"] != "precursor_interstitial" {
+                // The managed flow next loads its component from this fixed
+                // origin. Open only that transport while the script is read.
+                s.prewarm(FRAME_ORIGIN).await;
+            }
             let script_url = challenge
                 .script
                 .as_ref()
@@ -707,29 +756,37 @@ impl Engine {
         require(frame.status == 200, "Frame page HTTP status")?;
         self.capture(&frame.content, ".frame.html")?;
         let document = frame.text.clone();
-        let capture = self.clone();
-        let (config, script_index) = crate::cpu::run(deadline, move || {
-            let (index, source) = document
+        let script_index = crate::cpu::run(deadline, move || {
+            document
                 .facts()?
                 .script_texts
                 .iter()
                 .enumerate()
                 .max_by_key(|(_, s)| s.len())
-                .ok_or_else(|| Error::new("FRAME_SCRIPT_MISSING", "验证组件缺少脚本"))?;
+                .map(|(index, _)| index)
+                .ok_or_else(|| Error::new("FRAME_SCRIPT_MISSING", "验证组件缺少脚本"))
+        })
+        .await?;
+        // Configuration and layout read the same current component script
+        // independently. Analyse them concurrently; both must succeed.
+        let (document, capture) = (frame.text.clone(), self.clone());
+        let configuration = crate::cpu::run(deadline, move || {
+            let source = &document.facts()?.script_texts[script_index];
             capture.capture(source.as_bytes(), ".frame.js")?;
-            let config = static_data::object_data(source, "_cf_chl_opt")?
-                .ok_or_else(|| Error::new("FRAME_CONFIG_UNSUPPORTED", "验证组件缺少配置"))?;
-            Ok((config, index))
-        })
-        .await?;
-        phase_ms["pageAndConfig"] = json!(frame_started.elapsed().as_millis() as u64);
-        let analysis = Instant::now();
+            static_data::object_data(source, "_cf_chl_opt")?
+                .ok_or_else(|| Error::new("FRAME_CONFIG_UNSUPPORTED", "验证组件缺少配置"))
+        });
         let document = frame.text.clone();
-        let p = crate::cpu::run(deadline, move || {
-            Plan::analyze(&document.facts()?.script_texts[script_index], true).map(Arc::new)
-        })
-        .await?;
-        let analysis_ms = analysis.elapsed().as_millis() as u64;
+        let layout = async move {
+            let analysis = Instant::now();
+            let p = crate::cpu::run(deadline, move || {
+                Plan::analyze(&document.facts()?.script_texts[script_index], true).map(Arc::new)
+            })
+            .await?;
+            Ok::<_, Error>((p, analysis.elapsed().as_millis() as u64))
+        };
+        let (config, (p, analysis_ms)) = tokio::try_join!(configuration, layout)?;
+        phase_ms["pageAndConfig"] = json!(frame_started.elapsed().as_millis() as u64);
         for name in [
             "buiX8", "QZAb2", "RUtA1", "MsSIK5", "yoFh0", "DstX3", "cYUbN2", "DNCSh4", "RIQr4",
             "MrbDg2", "UORq8", "ueNyz9",
@@ -783,6 +840,9 @@ impl Engine {
             string(&config["ueNyz9"])?
         );
         let wire_config = json!({"ray":config["UORq8"],"token":config["ueNyz9"]});
+        for host in learned_task_hosts() {
+            s.prewarm(&format!("https://{host}/")).await;
+        }
         let phase = Instant::now();
         let data = self
             .submit(
@@ -828,6 +888,7 @@ impl Engine {
         })
         .await?;
         phase_ms["catalog"] = json!(phase.elapsed().as_millis() as u64);
+        learn_task_hosts(&http_tasks);
         let mut pending = tokio::task::JoinSet::new();
         for task in http_tasks {
             pending.spawn(crate::network::inherit_context(crate::http_tasks::run(
@@ -934,8 +995,15 @@ impl Engine {
             string(&catalog.parameters["flow"])?
         );
         let phase = Instant::now();
-        let followup = self
-            .submit(
+        // Proof facts read only the current component document. Prepare them
+        // while the task submission is in flight; they are used only when the
+        // response requests work, and a preparation error surfaces only then.
+        let document = frame.text.clone();
+        let proof = crate::cpu::run(deadline, move || {
+            crate::native_input::proof_facts(document.facts()?)
+        });
+        let (followup, proof) = tokio::join!(
+            self.submit(
                 &s,
                 &wire_config,
                 &p,
@@ -947,8 +1015,10 @@ impl Engine {
                 "frame-tasks",
                 true,
                 None,
-            )
-            .await?;
+            ),
+            proof
+        );
+        let followup = followup?;
         phase_ms["taskSubmission"] = json!(phase.elapsed().as_millis() as u64);
         let o = match completion::next_for(&followup, embedded.is_some())? {
             completion::Next::Done(done) => {
@@ -997,11 +1067,7 @@ impl Engine {
         let finished = epoch_ms();
         let best = work.iter().max_by_key(|r| r[2]).unwrap();
         let attempts: u64 = work.iter().map(|r| r[1]).sum();
-        let document = frame.text.clone();
-        let mut task = crate::cpu::run(deadline, move || {
-            crate::native_input::proof_facts(document.facts()?)
-        })
-        .await?;
+        let mut task = proof?;
         copy(&mut task, &o, &["hmwT6", "nuvy8"]);
         merge(
             &mut task,

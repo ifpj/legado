@@ -97,20 +97,22 @@ pub(super) fn profile(t: &Tables<'_>) -> Result<Value> {
             let bindings = t
                 .all()
                 .iter()
+                // Check the inert array shape before resolving a subscript
+                // target. Same-object writes are common; array literals are not.
                 .filter(|n| {
                     matches!(n.kind(), "assignment_expression" | "variable_declarator")
-                        && n.child_by_field_name(if n.kind() == "assignment_expression" {
-                            "left"
-                        } else {
-                            "name"
-                        })
-                        .is_some_and(|n| same_reference(t, n, cvnode, &cv_reference))
                         && n.child_by_field_name(if n.kind() == "assignment_expression" {
                             "right"
                         } else {
                             "value"
                         })
                         .is_some_and(|n| n.kind() == "array")
+                        && n.child_by_field_name(if n.kind() == "assignment_expression" {
+                            "left"
+                        } else {
+                            "name"
+                        })
+                        .is_some_and(|n| same_reference(t, n, cvnode, &cv_reference))
                 })
                 // The obfuscator reuses short names in unrelated scopes.
                 // Bind the declaration to this reference's resolved CV.

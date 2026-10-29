@@ -193,6 +193,48 @@ impl Session {
         }
         unreachable!()
     }
+    /// Opens the TCP or proxy tunnel for a host this session will contact
+    /// next. No TLS, HTTP request or cookie is sent before the real request.
+    pub(crate) async fn prewarm(&self, url: &str) {
+        let Ok(url) = validate_url(url) else {
+            return;
+        };
+        let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
+            return;
+        };
+        let context = current_context();
+        if let Some(context) = context.as_ref().filter(|c| {
+            !c.connect_to.is_empty()
+                || c.dns
+                    .as_ref()
+                    .is_some_and(|dns| dns.config != self.dns.config)
+        }) {
+            let dns = context.dns.clone().unwrap_or_else(|| self.dns.clone());
+            let proxy = dns.config.proxy.clone();
+            if let Ok(transport) = context
+                .transport
+                .get_or_try_init(|| {
+                    Transport::new(dns, self.cookies.clone(), proxy, context.connect_to.clone())
+                })
+                .await
+            {
+                transport.prewarm(host, port);
+            }
+        } else if let Ok(transport) = self
+            .client
+            .get_or_try_init(|| {
+                Transport::new(
+                    self.dns.clone(),
+                    self.cookies.clone(),
+                    self.proxy.clone(),
+                    ConnectTo::default(),
+                )
+            })
+            .await
+        {
+            transport.prewarm(host, port);
+        }
+    }
     async fn request_once(
         &self,
         method: &str,
@@ -237,10 +279,14 @@ impl Session {
                 .await?
         };
         let client = transport.client.clone();
+        let route = transport.route(&validate_url(url)?);
         let mut request = client
             .request(Method::from_bytes(method.as_bytes()).map_err(error)?, url)
             .redirect(wreq::redirect::Policy::none())
             .timeout(remaining);
+        if let Some(route) = route {
+            request = request.proxy(route);
+        }
         for (k, v) in supplied {
             request = request.header(k, v);
         }

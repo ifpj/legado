@@ -25,6 +25,15 @@ type Tunnel = Box<dyn Stream>;
 pub(super) struct Transport {
     pub client: wreq::Client,
     _bridge: Option<Bridge>,
+    predial: Arc<PreDial>,
+    /// Direct clients normally connect by themselves. A loopback route is
+    /// started only after a host has been pre-dialed for this transport.
+    direct: Option<DirectRoute>,
+    bridged: Option<(Dns, Option<String>, ConnectTo)>,
+}
+struct DirectRoute {
+    dns: Dns,
+    bridge: std::sync::OnceLock<std::result::Result<(String, Bridge), String>>,
 }
 struct Bridge {
     task: JoinHandle<()>,
@@ -34,6 +43,61 @@ impl Drop for Bridge {
         self.task.abort();
     }
 }
+/// A pre-dialed connection carries only TCP (or the configured proxy tunnel).
+/// TLS, HTTP and cookies still start when the protocol makes its request.
+/// Short enough that an idle upstream socket has not been closed for lack of
+/// a TLS handshake; an older slot is discarded and the request dials anew.
+const PREDIAL_MAX_AGE: Duration = Duration::from_secs(5);
+const PREDIAL_LIMIT: usize = 8;
+#[derive(Default)]
+struct PreDial {
+    slots: std::sync::Mutex<std::collections::HashMap<(String, u16), Slot>>,
+    routed: std::sync::Mutex<std::collections::HashSet<(String, u16)>>,
+}
+struct Slot {
+    born: std::time::Instant,
+    task: Option<JoinHandle<io::Result<Tunnel>>>,
+}
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+impl PreDial {
+    fn take(&self, host: &str, port: u16) -> Option<JoinHandle<io::Result<Tunnel>>> {
+        let mut slots = self.slots.lock().unwrap();
+        let mut slot = slots.remove(&(host.to_ascii_lowercase(), port))?;
+        if slot.born.elapsed() > PREDIAL_MAX_AGE {
+            return None;
+        }
+        slot.task.take()
+    }
+}
+fn bridge(
+    listener: TcpListener,
+    dns: Dns,
+    proxy: Option<String>,
+    connect_to: ConnectTo,
+    predial: Arc<PreDial>,
+) -> Bridge {
+    let task = tokio::spawn(async move {
+        let mut tasks = JoinSet::new();
+        loop {
+            tokio::select! {
+                connection=listener.accept()=>{
+                    let Ok((stream,_))=connection else{break};
+                    let Ok(permit)=dns.connections.clone().try_acquire_owned() else{drop(stream);continue};
+                    let dns=dns.clone();let proxy=proxy.clone();let connect_to=connect_to.clone();let predial=predial.clone();
+                    tasks.spawn(async move {let _permit=permit;let _=serve(stream,dns,proxy,connect_to,predial).await;});
+                }
+                _=tasks.join_next(),if !tasks.is_empty()=>{}
+            }
+        }
+    });
+    Bridge { task }
+}
 impl Transport {
     pub async fn new(
         dns: Dns,
@@ -41,33 +105,127 @@ impl Transport {
         proxy: Option<String>,
         connect_to: ConnectTo,
     ) -> Result<Self> {
+        let predial = Arc::new(PreDial::default());
         if proxy.is_none() && connect_to.is_empty() {
             return Ok(Self {
-                client: client(dns, cookies, None)?,
+                client: client(dns.clone(), cookies, None)?,
                 _bridge: None,
+                predial,
+                direct: Some(DirectRoute {
+                    dns,
+                    bridge: std::sync::OnceLock::new(),
+                }),
+                bridged: None,
             });
         }
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let local = format!("socks5h://{}", listener.local_addr()?);
         let client = client(dns.clone(), cookies, Some(&local))?;
-        let task = tokio::spawn(async move {
-            let mut tasks = JoinSet::new();
-            loop {
-                tokio::select! {
-                    connection=listener.accept()=>{
-                        let Ok((stream,_))=connection else{break};
-                        let Ok(permit)=dns.connections.clone().try_acquire_owned() else{drop(stream);continue};
-                        let dns=dns.clone();let proxy=proxy.clone();let connect_to=connect_to.clone();
-                        tasks.spawn(async move {let _permit=permit;let _=serve(stream,dns,proxy,connect_to).await;});
-                    }
-                    _=tasks.join_next(),if !tasks.is_empty()=>{}
-                }
-            }
-        });
         Ok(Self {
             client,
-            _bridge: Some(Bridge { task }),
+            _bridge: Some(bridge(
+                listener,
+                dns.clone(),
+                proxy.clone(),
+                connect_to.clone(),
+                predial.clone(),
+            )),
+            predial,
+            direct: None,
+            bridged: Some((dns, proxy, connect_to)),
         })
+    }
+    /// Starts the transport connection for a host the current protocol will
+    /// contact next. Failures are ignored; the request then dials normally.
+    pub fn prewarm(&self, host: &str, port: u16) {
+        let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+        if host.is_empty() || port == 0 {
+            return;
+        }
+        let (dns, proxy, connect_to) = if let Some(direct) = &self.direct {
+            let started = direct.bridge.get_or_init(|| {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0")
+                    .and_then(|l| l.set_nonblocking(true).map(|_| l))
+                    .and_then(TcpListener::from_std)
+                    .map_err(|e| e.to_string())?;
+                let local = format!(
+                    "socks5h://{}",
+                    listener.local_addr().map_err(|e| e.to_string())?
+                );
+                Ok((
+                    local,
+                    bridge(
+                        listener,
+                        direct.dns.clone(),
+                        None,
+                        ConnectTo::default(),
+                        self.predial.clone(),
+                    ),
+                ))
+            });
+            if started.is_err() {
+                return;
+            }
+            (direct.dns.clone(), None, ConnectTo::default())
+        } else if let Some((dns, proxy, connect_to)) = &self.bridged {
+            (dns.clone(), proxy.clone(), connect_to.clone())
+        } else {
+            return;
+        };
+        if self.direct.is_some() {
+            self.predial
+                .routed
+                .lock()
+                .unwrap()
+                .insert((host.clone(), port));
+        }
+        self.spawn_predial(host, port, dns, proxy, connect_to);
+    }
+    fn spawn_predial(
+        &self,
+        host: String,
+        port: u16,
+        dns: Dns,
+        proxy: Option<String>,
+        connect_to: ConnectTo,
+    ) {
+        let mut slots = self.predial.slots.lock().unwrap();
+        slots.retain(|_, slot| slot.born.elapsed() <= PREDIAL_MAX_AGE);
+        let key = (host.clone(), port);
+        if slots.contains_key(&key) || slots.len() >= PREDIAL_LIMIT {
+            return;
+        }
+        let task = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(10), async move {
+                let destinations =
+                    destinations(host, port, &dns, proxy.as_deref(), &connect_to).await?;
+                dial(destinations, proxy.as_deref()).await
+            })
+            .await
+            .map_err(|_| failed("Predial timed out"))?
+        });
+        slots.insert(
+            key,
+            Slot {
+                born: std::time::Instant::now(),
+                task: Some(task),
+            },
+        );
+    }
+    /// Direct requests to a pre-dialed host use the transport's loopback
+    /// route for the whole session, so its HTTP/2 pool key stays stable.
+    pub fn route(&self, url: &url::Url) -> Option<wreq::Proxy> {
+        let direct = self.direct.as_ref()?;
+        let host = url
+            .host_str()?
+            .trim_matches(['[', ']'])
+            .to_ascii_lowercase();
+        let port = url.port_or_known_default()?;
+        if !self.predial.routed.lock().unwrap().contains(&(host, port)) {
+            return None;
+        }
+        let (local, _) = direct.bridge.get()?.as_ref().ok()?;
+        wreq::Proxy::all(local.as_str()).ok()
     }
 }
 enum Destination {
@@ -85,11 +243,80 @@ impl Destination {
 fn failed(message: impl std::fmt::Display) -> io::Error {
     io::Error::other(message.to_string())
 }
+async fn destinations(
+    host: String,
+    port: u16,
+    dns: &Dns,
+    proxy: Option<&str>,
+    connect_to: &ConnectTo,
+) -> io::Result<Vec<Destination>> {
+    Ok(if let Some(target) = connect_to.target(&host, port) {
+        vec![Destination::Socket(target)]
+    } else if let Ok(ip) = host.parse::<IpAddr>() {
+        vec![Destination::Socket(SocketAddr::new(ip, port))]
+    } else if proxy.is_some() && !dns.config.doh {
+        vec![Destination::Name(host, port)]
+    } else {
+        dns.lookup(&host)
+            .await
+            .map_err(failed)?
+            .into_iter()
+            .map(|mut ip| {
+                ip.set_port(port);
+                Destination::Socket(ip)
+            })
+            .collect()
+    })
+}
+/// Proxies are single endpoints and keep their sequential behaviour. Direct
+/// addresses use a short stagger so one stalled address family cannot hold
+/// the whole connection, matching the client connector's fallback timing.
+async fn dial(destinations: Vec<Destination>, proxy: Option<&str>) -> io::Result<Tunnel> {
+    let mut last = failed("No target addresses");
+    if proxy.is_some() || destinations.len() <= 1 {
+        for destination in destinations {
+            match connect(&destination, proxy).await {
+                Ok(stream) => return Ok(stream),
+                Err(error) => last = error,
+            }
+        }
+        return Err(last);
+    }
+    let mut pending = JoinSet::new();
+    let mut remaining = destinations.into_iter();
+    loop {
+        if let Some(destination) = remaining.next() {
+            pending.spawn(async move { connect(&destination, None).await });
+        }
+        let stagger = tokio::time::sleep(Duration::from_millis(300));
+        tokio::pin!(stagger);
+        loop {
+            tokio::select! {
+                finished = pending.join_next(), if !pending.is_empty() => {
+                    match finished {
+                        Some(Ok(Ok(stream))) => return Ok(stream),
+                        Some(Ok(Err(error))) => last = error,
+                        Some(Err(error)) => last = failed(error),
+                        None => {}
+                    }
+                    if pending.is_empty() {
+                        break;
+                    }
+                }
+                _ = &mut stagger => break,
+            }
+        }
+        if pending.is_empty() && remaining.len() == 0 {
+            return Err(last);
+        }
+    }
+}
 async fn serve(
     mut inbound: TcpStream,
     dns: Dns,
     proxy: Option<String>,
     connect_to: ConnectTo,
+    predial: Arc<PreDial>,
 ) -> io::Result<()> {
     let established = tokio::time::timeout(Duration::from_secs(10), async {
         if inbound.read_u8().await? != 5 {
@@ -136,31 +363,13 @@ async fn serve(
         {
             return Err(failed("SOCKS target"));
         }
-        let destinations = if let Some(target) = connect_to.target(&host, port) {
-            vec![Destination::Socket(target)]
-        } else if let Ok(ip) = host.parse::<IpAddr>() {
-            vec![Destination::Socket(SocketAddr::new(ip, port))]
-        } else if proxy.is_some() && !dns.config.doh {
-            vec![Destination::Name(host, port)]
-        } else {
-            dns.lookup(&host)
-                .await
-                .map_err(failed)?
-                .into_iter()
-                .map(|mut ip| {
-                    ip.set_port(port);
-                    Destination::Socket(ip)
-                })
-                .collect()
-        };
-        let mut last = failed("No target addresses");
-        for destination in destinations {
-            match connect(&destination, proxy.as_deref()).await {
-                Ok(stream) => return Ok(stream),
-                Err(error) => last = error,
+        if let Some(ready) = predial.take(&host, port) {
+            if let Ok(Ok(stream)) = ready.await {
+                return Ok(stream);
             }
         }
-        Err(last)
+        let destinations = destinations(host, port, &dns, proxy.as_deref(), &connect_to).await?;
+        dial(destinations, proxy.as_deref()).await
     })
     .await;
     let mut upstream = match established {

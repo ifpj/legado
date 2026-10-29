@@ -331,11 +331,51 @@ pub(crate) struct PendingSealed {
     source: String,
     tree: Option<tree_sitter::Tree>,
     expected: Value,
+    early: EarlySealed,
+}
+/// The current key read from the original syntax tree, started before
+/// literal decoding. It is aborted when the pending check is discarded.
+#[derive(Default)]
+pub(crate) struct EarlySealed(Option<tokio::task::JoinHandle<Result<Value>>>);
+impl From<Option<tokio::task::JoinHandle<Result<Value>>>> for EarlySealed {
+    fn from(task: Option<tokio::task::JoinHandle<Result<Value>>>) -> Self {
+        Self(task)
+    }
+}
+impl Drop for EarlySealed {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
 }
 impl PendingSealed {
+    pub(crate) fn with_early(mut self, early: EarlySealed) -> Self {
+        self.early = early;
+        self
+    }
     pub(crate) fn validate(self) -> Result<()> {
         let current = crate::compiler::current_sealed(&self.source, self.tree.as_ref())?;
         bind_current_sealed(&mut json!({"sealed_literals":self.expected}), current)
+    }
+    /// Decoding replaces only decoder calls with string literals. If the key
+    /// array resolves without them, its values are the same in the decoded
+    /// source; a matching early read is therefore sufficient. Any early error
+    /// or difference falls back to the complete decoded-source check.
+    pub(crate) async fn check(mut self, deadline: std::time::Instant) -> Result<()> {
+        if let Some(task) = self.early.0.take() {
+            if let Ok(Ok(current)) = task.await {
+                if bind_current_sealed(
+                    &mut json!({"sealed_literals":self.expected.clone()}),
+                    current,
+                )
+                .is_ok()
+                {
+                    return Ok(());
+                }
+            }
+        }
+        crate::cpu::run(deadline, move || self.validate()).await
     }
 }
 fn bind_current_sealed(meta: &mut Value, current: Value) -> Result<()> {
@@ -426,6 +466,7 @@ impl Plan {
                 source: source.to_owned(),
                 tree: prepared.tree,
                 expected: meta["sealed_literals"].clone(),
+                early: EarlySealed::default(),
             })
         } else {
             if meta["build"] == "c787ce48cf6b" {
@@ -483,13 +524,15 @@ mod sealed_layout_reuse_tests {
             source: source.into(),
             tree: None,
             expected: expected.clone(),
+            early: EarlySealed::default(),
         }
         .validate()
         .unwrap();
         assert!(PendingSealed {
             source: source.replace("7-6", "7-5"),
             tree: None,
-            expected
+            expected,
+            early: EarlySealed::default(),
         }
         .validate()
         .is_err());
@@ -510,6 +553,54 @@ mod sealed_layout_reuse_tests {
         assert!(
             bind_current_sealed(&mut meta, json!({"iv":[1,2,3,4,5,6,7,8],"version":2})).is_err()
         );
+    }
+    #[tokio::test]
+    async fn early_original_key_matches_complete_check_and_differences_fall_back() {
+        let source = "function outer(){var renamed=[7-6,2,3,4,5,6,7,8];function pack(which,input){return [input.bytes,1,2,3,4,[renamed[0],renamed[1],renamed[2],renamed[3],renamed[4],renamed[5],renamed[6],renamed[7]]];}}";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_javascript::LANGUAGE.into())
+            .unwrap();
+        let original =
+            crate::compiler::current_sealed_original(source, &parser.parse(source, None).unwrap())
+                .unwrap();
+        let complete = crate::compiler::current_sealed(source, None).unwrap();
+        assert_eq!(original["iv"], complete["iv"]);
+        assert_eq!(original["version"], complete["version"]);
+        let expected = json!({"iv":[1,2,3,4,5,6,7,8],"version":1});
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let pending = |source: String, early: Result<Value>| {
+            PendingSealed {
+                source,
+                tree: None,
+                expected: expected.clone(),
+                early: EarlySealed::default(),
+            }
+            .with_early(EarlySealed::from(Some(tokio::spawn(async move { early }))))
+        };
+        pending(source.into(), Ok(original.clone()))
+            .check(deadline)
+            .await
+            .unwrap();
+        let mut other = original.clone();
+        other["iv"] = json!([8, 7, 6, 5, 4, 3, 2, 1]);
+        let changed = source.replace("7-6", "7-5");
+        for early in [
+            Ok(other.clone()),
+            Err(Error::new("UNSUPPORTED_FORMAT", "early read failed")),
+        ] {
+            let retry = match &early {
+                Ok(v) => Ok(v.clone()),
+                Err(e) => Err(e.clone()),
+            };
+            // A differing or failed early read never accepts by itself; the
+            // complete decoded-source check still decides both outcomes.
+            pending(source.into(), early).check(deadline).await.unwrap();
+            assert!(pending(changed.clone(), retry)
+                .check(deadline)
+                .await
+                .is_err());
+        }
     }
 }
 #[derive(Clone, Debug, Serialize)]

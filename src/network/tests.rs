@@ -817,3 +817,88 @@ async fn mapped_https_keeps_original_sni_and_rejects_untrusted_certificates() {
     task.await.unwrap();
     assert_eq!(seen.lock().unwrap().as_deref(), Some("target.example"));
 }
+
+/// Raw HTTP/1.1 fixture counting accepted TCP connections and requests.
+async fn counted_server() -> (Server, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (accepted, requests) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let (a, r) = (accepted.clone(), requests.clone());
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            a.fetch_add(1, Ordering::SeqCst);
+            let r = r.clone();
+            tokio::spawn(async move {
+                let mut header = Vec::new();
+                let mut byte = [0u8; 1];
+                while stream.read(&mut byte).await.unwrap_or(0) == 1 {
+                    header.push(byte[0]);
+                    if header.ends_with(b"\r\n\r\n") {
+                        header.clear();
+                        r.fetch_add(1, Ordering::SeqCst);
+                        let reply = b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\n\r\nok";
+                        if stream.write_all(reply).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let url = format!("http://{address}");
+    (Server { url, task }, accepted, requests)
+}
+#[tokio::test]
+async fn prewarm_opens_only_the_transport_that_the_next_request_uses() {
+    for mapped in [false, true] {
+        let (server, accepted, requests) = counted_server().await;
+        let port = url::Url::parse(&server.url).unwrap().port().unwrap();
+        let target = if mapped {
+            format!("http://mapped.example:{port}/")
+        } else {
+            format!("{}/", server.url)
+        };
+        let mapping = if mapped {
+            json!({format!("mapped.example:{port}"):format!("127.0.0.1:{port}")})
+        } else {
+            json!({})
+        };
+        let context = RequestContext::new(ConnectTo::parse(Some(&mapping)).unwrap());
+        let warmed = session();
+        with_context(context.clone(), warmed.prewarm(&target)).await;
+        let opened = Instant::now();
+        while accepted.load(Ordering::SeqCst) == 0 {
+            assert!(
+                opened.elapsed() < Duration::from_secs(3),
+                "predial did not connect"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // The early connection carries no request before the protocol asks.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let response = with_context(
+            context.clone(),
+            warmed.request("GET", &format!("{target}page"), None, &[], deadline),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.content, b"ok");
+        assert_eq!(accepted.load(Ordering::SeqCst), 1, "mapped={mapped}");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        // A second session without a predial still dials for itself.
+        // Request contexts are per request; a new one must not share a pool.
+        let other = session();
+        with_context(
+            RequestContext::new(ConnectTo::parse(Some(&mapping)).unwrap()),
+            other.request("GET", &format!("{target}other"), None, &[], deadline),
+        )
+        .await
+        .unwrap();
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    }
+}

@@ -294,13 +294,30 @@ pub(crate) fn object_data(source: &str, name: &str) -> Result<Option<Value>> {
     parser
         .set_language(&tree_sitter_javascript::LANGUAGE.into())
         .unwrap();
+    // A matching assignment target is exactly `name` or `window.name`, so each
+    // matching node and its ancestors contain an occurrence of `name`. The
+    // whole script is still parsed; only subtrees without one are skipped.
+    let step = name.chars().next().map_or(1, char::len_utf8);
+    let mut occurrences = Vec::new();
+    let mut from = 0;
+    while let Some(index) = source[from..].find(name) {
+        occurrences.push(from + index);
+        from += index + step;
+    }
     let tree = crate::cpu::parse(&mut parser, source)?;
+    let contains = |node: Node<'_>| {
+        let i = occurrences.partition_point(|p| *p < node.start_byte());
+        i < occurrences.len() && occurrences[i] + name.len() <= node.end_byte()
+    };
     let mut found = Vec::new();
-    let mut pending = vec![tree.root_node()];
+    let mut pending: Vec<_> = Some(tree.root_node())
+        .filter(|n| contains(*n))
+        .into_iter()
+        .collect();
     while let Some(node) = pending.pop() {
         crate::cpu::check()?;
         let mut cursor = node.walk();
-        pending.extend(node.named_children(&mut cursor));
+        pending.extend(node.named_children(&mut cursor).filter(|n| contains(*n)));
         if node.kind() != "assignment_expression" {
             continue;
         }
