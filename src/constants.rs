@@ -6,6 +6,13 @@ use std::{
     sync::Arc,
 };
 use tree_sitter::Node;
+mod env;
+mod flattened;
+mod shallow;
+pub use env::Env;
+#[cfg(test)]
+mod memo_tests;
+mod scalar_loops;
 
 #[derive(Clone, Debug)]
 pub enum Constant<'a> {
@@ -21,7 +28,6 @@ pub enum Constant<'a> {
     Decoder,
     Dynamic,
 }
-pub type Env<'a> = HashMap<String, Constant<'a>>;
 impl<'a> Constant<'a> {
     pub fn number(&self) -> Result<f64> {
         match self {
@@ -94,25 +100,64 @@ pub fn children(n: Node<'_>) -> Vec<Node<'_>> {
         .collect()
 }
 pub fn walk(n: Node<'_>, descend: bool) -> Vec<Node<'_>> {
-    let mut pending = vec![n];
-    let mut out = Vec::new();
-    while let Some(node) = pending.pop() {
+    let mut cursor = n.walk();
+    let mut out = vec![n];
+    let mut enter = true;
+    loop {
+        if !(enter && cursor.goto_first_child()) {
+            if cursor.node() == n {
+                return out;
+            }
+            loop {
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() || cursor.node() == n {
+                    return out;
+                }
+            }
+        }
+        let node = cursor.node();
+        if !node.is_named() || node.kind() == "comment" {
+            enter = false;
+            continue;
+        }
         out.push(node);
-        if !descend
-            && node != n
-            && matches!(
+        enter = descend
+            || !matches!(
                 node.kind(),
                 "function_declaration"
                     | "function_expression"
                     | "arrow_function"
                     | "method_definition"
-            )
-        {
-            continue;
-        }
-        pending.extend(children(node).into_iter().rev());
+            );
     }
-    out
+}
+pub(crate) fn scope_index<'a>(nodes: &[Node<'a>], methods: bool) -> HashMap<usize, Node<'a>> {
+    let mut owners = HashMap::with_capacity(nodes.len());
+    let mut pending = Vec::<Node<'a>>::new();
+    for (index, node) in nodes.iter().copied().enumerate() {
+        if index % 1024 == 0 && crate::cpu::stopped() {
+            break;
+        }
+        while pending
+            .last()
+            .is_some_and(|owner| owner.end_byte() <= node.start_byte())
+        {
+            pending.pop();
+        }
+        if let Some(owner) = pending.last() {
+            owners.insert(node.id(), *owner);
+        }
+        if matches!(
+            node.kind(),
+            "program" | "function_declaration" | "function_expression" | "arrow_function"
+        ) || methods && node.kind() == "method_definition"
+        {
+            pending.push(node);
+        }
+    }
+    owners
 }
 pub struct Tables<'a> {
     pub root: Node<'a>,
@@ -126,14 +171,26 @@ pub struct Tables<'a> {
     overrides: RefCell<HashMap<usize, Constant<'a>>>,
     nodes: Vec<Node<'a>>,
     positions: HashMap<usize, usize>,
+    scope_owners: HashMap<usize, Node<'a>>,
     decoder_node: Option<usize>,
     recovered_bindings: HashMap<usize, Constant<'a>>,
+    memoized_strings: RefCell<HashMap<usize, HashMap<String, Option<String>>>>,
+    ready_bindings: RefCell<HashMap<usize, HashMap<String, bool>>>,
+    shallow_values: RefCell<HashMap<usize, Constant<'a>>>,
+    watched_override: Cell<Option<(usize, usize)>>,
 }
 impl<'a> Tables<'a> {
     pub fn text(&self, n: Node<'_>) -> &str {
         &self.source[n.byte_range()]
     }
     pub fn new(root: Node<'a>, source: &'a str) -> Result<Self> {
+        let mut t = Self::syntax(root, source)?;
+        t.recover()?;
+        crate::cpu::check()?;
+        t.scopes.borrow_mut().clear();
+        Ok(t)
+    }
+    pub(crate) fn syntax(root: Node<'a>, source: &'a str) -> Result<Self> {
         crate::cpu::check()?;
         let nodes = walk(root, true);
         let positions = nodes
@@ -141,10 +198,11 @@ impl<'a> Tables<'a> {
             .enumerate()
             .map(|(index, node)| (node.id(), index))
             .collect();
-        let mut t = Self {
+        let scope_owners = scope_index(&nodes, true);
+        let t = Self {
             root,
             source,
-            globals: RefCell::new(HashMap::new()),
+            globals: RefCell::new(Env::new()),
             pool: vec![],
             offset: 0,
             rotation: Cell::new(0),
@@ -153,8 +211,13 @@ impl<'a> Tables<'a> {
             overrides: RefCell::new(HashMap::new()),
             nodes,
             positions,
+            scope_owners,
             decoder_node: None,
             recovered_bindings: HashMap::new(),
+            memoized_strings: RefCell::new(HashMap::new()),
+            ready_bindings: RefCell::new(HashMap::new()),
+            shallow_values: RefCell::new(HashMap::new()),
+            watched_override: Cell::new(None),
         };
         // Bind declarations as inert function syntax even in small scripts
         // without an obfuscated pool. Only the bounded evaluator may use them.
@@ -167,9 +230,6 @@ impl<'a> Tables<'a> {
                 }
             }
         }
-        t.recover()?;
-        crate::cpu::check()?;
-        t.scopes.borrow_mut().clear();
         Ok(t)
     }
     pub fn all(&self) -> &[Node<'a>] {
@@ -235,6 +295,19 @@ impl<'a> Tables<'a> {
         self.overrides.replace(previous);
         result
     }
+    pub(crate) fn bound_once(
+        &self,
+        node: Node<'a>,
+        env: &mut Env<'a>,
+        id: usize,
+        value: Constant<'a>,
+    ) -> Result<Constant<'a>> {
+        let previous = self.watched_override.replace(Some((id, 0)));
+        let result = self.bound(node, env, HashMap::from([(id, value)]));
+        let (_, count) = self.watched_override.replace(previous).unwrap();
+        require(count == 1, "Reader must be invoked exactly once")?;
+        result
+    }
     pub fn strings(&self) -> Vec<String> {
         let mut values = self
             .pool
@@ -266,7 +339,33 @@ impl<'a> Tables<'a> {
         self.evaluate(n, env, 0)
     }
     pub fn value(&self, n: Node<'a>) -> Result<Constant<'a>> {
-        self.eval(n, &mut self.scope(n))
+        // Literal arithmetic has no bindings to resolve. In particular, array
+        // slots must not construct and copy an entire enclosing scope merely
+        // to evaluate an index such as 24 * 4. Bound proofs still use eval's
+        // normal override, step and cancellation checks.
+        fn closed(n: Node<'_>, depth: usize, remaining: &mut usize) -> bool {
+            if depth > 40 || *remaining == 0 {
+                return false;
+            }
+            *remaining -= 1;
+            let n = unwrap(n);
+            match n.kind() {
+                "number" | "string" | "template_string" | "true" | "false" | "null" => true,
+                "unary_expression" => n
+                    .child_by_field_name("argument")
+                    .is_some_and(|a| closed(a, depth + 1, remaining)),
+                "binary_expression" => ["left", "right"].iter().all(|field| {
+                    n.child_by_field_name(field)
+                        .is_some_and(|a| closed(a, depth + 1, remaining))
+                }),
+                _ => false,
+            }
+        }
+        if closed(n, 0, &mut 2000) {
+            self.eval(n, &mut Env::new())
+        } else {
+            self.eval(n, &mut self.scope(n))
+        }
     }
     pub fn evaluate(&self, n: Node<'a>, env: &mut Env<'a>, depth: usize) -> Result<Constant<'a>> {
         crate::cpu::check()?;
@@ -275,6 +374,9 @@ impl<'a> Tables<'a> {
         require(count <= 2000 && depth <= 40, "Static expression budget")?;
         let n = unwrap(n);
         if let Some(value) = self.overrides.borrow().get(&n.id()) {
+            if let Some((id, count)) = self.watched_override.get().filter(|(id, _)| *id == n.id()) {
+                self.watched_override.set(Some((id, count + 1)));
+            }
             return Ok(value.clone());
         }
         let text = self.text(n);
@@ -364,7 +466,19 @@ impl<'a> Tables<'a> {
             }
             "binary_expression" => {
                 let op = self.text(child(n, "operator")?);
-                let a = eval(child(n, "left")?, env)?;
+                let a = match eval(child(n, "left")?, env) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if op == "||" {
+                            if let Some((name, value)) = self.memoized_string(n) {
+                                let value = Constant::Text(value);
+                                env.insert(name, value.clone());
+                                return Ok(value);
+                            }
+                        }
+                        return Err(error);
+                    }
+                };
                 if op == "&&" && !a.truth()? || op == "||" && a.truth()? {
                     return Ok(a);
                 }
@@ -500,7 +614,14 @@ impl<'a> Tables<'a> {
             }
             "sequence_expression" => {
                 let mut v = Constant::Null;
-                for c in children(n) {
+                let parts = children(n);
+                for (index, c) in parts.iter().copied().enumerate() {
+                    if index + 1 < parts.len()
+                        && unwrap(c).kind() == "identifier"
+                        && self.ready_binding(c)
+                    {
+                        continue;
+                    }
                     v = eval(c, env)?;
                 }
                 v
@@ -508,6 +629,33 @@ impl<'a> Tables<'a> {
             "call_expression" => {
                 let callee = child(n, "function")?;
                 let args = children(child(n, "arguments")?);
+                if matches!(callee.kind(), "member_expression" | "subscript_expression")
+                    && args.len() == 1
+                {
+                    let method = if let Some(p) = callee.child_by_field_name("property") {
+                        Some(self.text(p).to_string())
+                    } else {
+                        callee
+                            .child_by_field_name("index")
+                            .and_then(|i| eval(i, env).ok()?.text().ok())
+                    };
+                    if method.as_deref() == Some("split") {
+                        let Constant::Text(text) = eval(child(callee, "object")?, env)? else {
+                            return Err(unknown("Static split receiver"));
+                        };
+                        let delimiter = eval(args[0], env)?.text()?;
+                        require(
+                            !delimiter.is_empty() && text.len() <= 4096,
+                            "Static split bounds",
+                        )?;
+                        let values = text
+                            .split(&delimiter)
+                            .map(|s| Constant::Text(s.to_string()))
+                            .collect::<Vec<_>>();
+                        require(values.len() <= 128, "Static split item bounds")?;
+                        return Ok(Constant::Array(values.into()));
+                    }
+                }
                 if matches!(callee.kind(), "member_expression" | "subscript_expression")
                     && self.text(child(callee, "object")?) == "Reflect"
                 {
@@ -572,6 +720,16 @@ impl<'a> Tables<'a> {
         let Constant::Function(node) = f else {
             return Err(unknown("Not a constant wrapper"));
         };
+        if let Some(value) = self.overrides.borrow().get(&node.id()) {
+            if let Some((id, count)) = self
+                .watched_override
+                .get()
+                .filter(|(id, _)| *id == node.id())
+            {
+                self.watched_override.set(Some((id, count + 1)));
+            }
+            return Ok(value.clone());
+        }
         let params = children(child(node, "parameters")?);
         let mut local = self.scope(node);
         for (i, p) in params.into_iter().enumerate() {
@@ -581,8 +739,18 @@ impl<'a> Tables<'a> {
                 }
             }
         }
-        for statement in children(child(node, "body")?) {
+        if let Some(value) = self.counter_identity(node, &mut local, depth)? {
+            return Ok(value);
+        }
+        let statements = self.flattened_statements(node, &mut local, depth)?;
+        let mut pending = statements.into_iter().rev().collect::<Vec<_>>();
+        while let Some(statement) = pending.pop() {
             match statement.kind() {
+                "statement_block" => pending.extend(
+                    self.flattened_statements(statement, &mut local, depth)?
+                        .into_iter()
+                        .rev(),
+                ),
                 "empty_statement" => (),
                 "variable_declaration" | "lexical_declaration" => {
                     for declaration in children(statement) {
@@ -624,19 +792,14 @@ impl<'a> Tables<'a> {
                         }
                     }
                     if let Some(case) = chosen.or(fallback) {
-                        for statement in children(case) {
-                            if statement.kind() == "return_statement" {
-                                return self.evaluate(
-                                    statement
-                                        .named_child(0)
-                                        .ok_or_else(|| unknown("Empty constant return"))?,
-                                    &mut local,
-                                    depth + 1,
-                                );
-                            }
+                        let mut body = children(case);
+                        if case.kind() == "switch_case" {
+                            body.remove(0);
                         }
+                        pending.extend(body.into_iter().rev());
+                    } else {
+                        return Err(unknown("Unsupported constant switch"));
                     }
-                    return Err(unknown("Unsupported constant switch"));
                 }
                 _ => return Err(unknown("Nonconstant wrapper statement")),
             }
@@ -852,23 +1015,239 @@ impl<'a> Tables<'a> {
         }
         Ok(())
     }
-    pub fn scope(&self, node: Node<'a>) -> Env<'a> {
-        if crate::cpu::stopped() {
-            return Env::new();
-        }
-        let mut parent = node.parent();
-        while parent.is_some_and(|p| {
-            !matches!(
-                p.kind(),
+    fn ready_binding(&self, node: Node<'a>) -> bool {
+        let name = self.text(unwrap(node));
+        let mut ancestor = node.parent();
+        while let Some(owner) = ancestor {
+            ancestor = owner.parent();
+            if !matches!(
+                owner.kind(),
                 "function_declaration"
                     | "function_expression"
                     | "arrow_function"
                     | "method_definition"
-            )
-        }) {
-            parent = parent.unwrap().parent()
+                    | "program"
+            ) {
+                continue;
+            }
+            if !self.ready_bindings.borrow().contains_key(&owner.id()) {
+                let mut bindings = HashMap::new();
+                if let Some(params) = owner.child_by_field_name("parameters") {
+                    for p in self
+                        .walk(params, true)
+                        .into_iter()
+                        .filter(|n| n.kind() == "identifier")
+                    {
+                        bindings.insert(self.text(p).to_string(), true);
+                    }
+                }
+                if let Some(param) = owner.child_by_field_name("parameter") {
+                    bindings.insert(self.text(param).to_string(), true);
+                }
+                for n in self.walk(owner.child_by_field_name("body").unwrap_or(owner), false) {
+                    if crate::cpu::stopped() {
+                        return false;
+                    }
+                    if n.kind() == "variable_declarator" {
+                        if let Some(target) = n
+                            .child_by_field_name("name")
+                            .filter(|n| n.kind() == "identifier")
+                        {
+                            let ready = n
+                                .parent()
+                                .is_some_and(|p| p.kind() == "variable_declaration");
+                            bindings
+                                .entry(self.text(target).to_string())
+                                .and_modify(|v| *v &= ready)
+                                .or_insert(ready);
+                        }
+                    }
+                }
+                self.ready_bindings
+                    .borrow_mut()
+                    .insert(owner.id(), bindings);
+            }
+            if let Some(ready) = self
+                .ready_bindings
+                .borrow()
+                .get(&owner.id())
+                .and_then(|m| m.get(name))
+            {
+                return *ready;
+            }
         }
-        let Some(parent) = parent else {
+        false
+    }
+    fn memoized_string(&self, node: Node<'a>) -> Option<(String, String)> {
+        let left = unwrap(child(node, "left").ok()?);
+        let write = unwrap(child(node, "right").ok()?);
+        if left.kind() != "identifier"
+            || write.kind() != "assignment_expression"
+            || self.text(child(write, "left").ok()?) != self.text(left)
+            || !matches!(
+                unwrap(child(write, "right").ok()?).kind(),
+                "string" | "template_string"
+            )
+        {
+            return None;
+        }
+        let name = self.text(left);
+        let mut ancestor = node.parent();
+        while let Some(owner) = ancestor {
+            ancestor = owner.parent();
+            if !matches!(
+                owner.kind(),
+                "function_declaration"
+                    | "function_expression"
+                    | "arrow_function"
+                    | "method_definition"
+                    | "program"
+            ) {
+                continue;
+            }
+            if !self.memoized_strings.borrow().contains_key(&owner.id()) {
+                let body = owner.child_by_field_name("body").unwrap_or(owner);
+                let mut declared = HashSet::new();
+                let mut blocked = HashSet::new();
+                let mut values = HashMap::<String, String>::new();
+                for n in self.walk(body, true) {
+                    if crate::cpu::stopped() {
+                        return None;
+                    }
+                    if n.kind() == "variable_declarator" {
+                        let target = child(n, "name").ok()?;
+                        if target.kind() == "identifier" {
+                            let name = self.text(target).to_string();
+                            if !declared.insert(name.clone())
+                                || n.child_by_field_name("value").is_some()
+                                || !n
+                                    .parent()
+                                    .is_some_and(|p| p.kind() == "variable_declaration")
+                            {
+                                blocked.insert(name);
+                            }
+                        } else {
+                            for name in self.walk(target, true).into_iter().filter(|n| {
+                                n.kind() == "identifier"
+                                    || n.kind() == "shorthand_property_identifier_pattern"
+                            }) {
+                                blocked.insert(self.text(name).to_string());
+                            }
+                        }
+                    }
+                    if n.kind() == "formal_parameters" {
+                        for parameter in self
+                            .walk(n, true)
+                            .into_iter()
+                            .filter(|p| p.kind() == "identifier")
+                        {
+                            blocked.insert(self.text(parameter).to_string());
+                        }
+                    }
+                    if n.kind() == "function_declaration" {
+                        if let Some(name) = n.child_by_field_name("name") {
+                            blocked.insert(self.text(name).to_string());
+                        }
+                    }
+                    let target = match n.kind() {
+                        "assignment_expression" | "augmented_assignment_expression" => {
+                            n.child_by_field_name("left")
+                        }
+                        "update_expression" => n.child_by_field_name("argument"),
+                        _ => None,
+                    };
+                    if let Some(pattern) =
+                        target.filter(|p| matches!(p.kind(), "array_pattern" | "object_pattern"))
+                    {
+                        for name in self.walk(pattern, true).into_iter().filter(|n| {
+                            n.kind() == "identifier"
+                                || n.kind() == "shorthand_property_identifier_pattern"
+                        }) {
+                            blocked.insert(self.text(name).to_string());
+                        }
+                    }
+                    let Some(target) = target.filter(|p| p.kind() == "identifier") else {
+                        continue;
+                    };
+                    let name = self.text(target).to_string();
+                    let mut parent = n.parent();
+                    while parent.is_some_and(|p| p.kind() == "parenthesized_expression") {
+                        parent = parent.unwrap().parent();
+                    }
+                    let guarded = parent.is_some_and(|p| {
+                        p.kind() == "binary_expression"
+                            && child(p, "operator").is_ok_and(|op| self.text(op) == "||")
+                            && child(p, "left").is_ok_and(|l| {
+                                unwrap(l).kind() == "identifier" && self.text(unwrap(l)) == name
+                            })
+                            && child(p, "right").is_ok_and(|r| unwrap(r) == n)
+                    });
+                    let text = if guarded && n.kind() == "assignment_expression" {
+                        child(n, "right")
+                            .ok()
+                            .map(unwrap)
+                            .filter(|r| matches!(r.kind(), "string" | "template_string"))
+                            .and_then(|r| unquote(self.text(r)).ok())
+                            .filter(|s| !s.is_empty())
+                    } else {
+                        None
+                    };
+                    if let Some(text) = text {
+                        if values.get(&name).is_some_and(|previous| *previous != text) {
+                            blocked.insert(name.clone());
+                        }
+                        values.insert(name, text);
+                    } else {
+                        blocked.insert(name);
+                    }
+                }
+                if let Some(parameters) = owner.child_by_field_name("parameters") {
+                    for p in self.walk(parameters, true) {
+                        if p.kind() == "identifier" {
+                            blocked.insert(self.text(p).to_string());
+                        }
+                    }
+                }
+                if let Some(p) = owner.child_by_field_name("parameter") {
+                    blocked.insert(self.text(p).to_string());
+                }
+                let bindings = declared
+                    .into_iter()
+                    .chain(blocked.iter().cloned())
+                    .map(|name| {
+                        let value = if blocked.contains(&name) {
+                            None
+                        } else {
+                            values.remove(&name)
+                        };
+                        (name, value)
+                    })
+                    .collect();
+                self.memoized_strings
+                    .borrow_mut()
+                    .insert(owner.id(), bindings);
+            }
+            if let Some(value) = self
+                .memoized_strings
+                .borrow()
+                .get(&owner.id())
+                .and_then(|m| m.get(name))
+            {
+                return value.clone().map(|v| (name.to_string(), v));
+            }
+        }
+        None
+    }
+    pub fn scope(&self, node: Node<'a>) -> Env<'a> {
+        if crate::cpu::stopped() {
+            return Env::new();
+        }
+        let Some(parent) = self
+            .scope_owners
+            .get(&node.id())
+            .copied()
+            .filter(|n| n.kind() != "program")
+        else {
             return Env::new();
         };
         if let Some(env) = self.scopes.borrow().get(&parent.id()) {
@@ -942,9 +1321,6 @@ impl<'a> Tables<'a> {
             if !matches!(n.kind(), "assignment_expression" | "variable_declarator") {
                 continue;
             }
-            // Only binding evaluation can re-enter this scope. Avoid cloning
-            // its arrays and objects for every unrelated syntax node.
-            self.scopes.borrow_mut().insert(parent.id(), local.clone());
             let (Ok(left), Ok(right)) = (
                 child(
                     n,
@@ -971,6 +1347,7 @@ impl<'a> Tables<'a> {
                 };
                 let name = self.text(object);
                 if object.kind() == "identifier" && owned.contains(name) {
+                    self.scopes.borrow_mut().insert(parent.id(), local.clone());
                     let key = if let Some(prop) = left.child_by_field_name("property") {
                         Ok(self.text(prop).into())
                     } else {
@@ -982,6 +1359,11 @@ impl<'a> Tables<'a> {
                         let value = self
                             .eval(right, &mut local.clone())
                             .unwrap_or(Constant::Dynamic);
+                        // All re-entrant evaluation has finished. Retaining
+                        // our temporary published snapshot here would force
+                        // a full COW table copy for every individual slot.
+                        // Other snapshots still keep their own immutable view.
+                        self.scopes.borrow_mut().remove(&parent.id());
                         match local.get_mut(name) {
                             Some(Constant::Object(map)) => {
                                 Arc::make_mut(map).insert(k, value);
@@ -1005,6 +1387,9 @@ impl<'a> Tables<'a> {
                 continue;
             }
             let name = self.text(left);
+            // Publish only before a binding that can actually be evaluated;
+            // rejected dynamic/reassigned bindings cannot re-enter the scope.
+            self.scopes.borrow_mut().insert(parent.id(), local.clone());
             if let Some(v) = self
                 .recovered_bindings
                 .get(&n.id())
@@ -1025,6 +1410,7 @@ impl<'a> Tables<'a> {
                     if matches!(v, Constant::Object(_) | Constant::Array(_)) {
                         owned.insert(name.to_string());
                     }
+                    self.scopes.borrow_mut().remove(&parent.id());
                     local.insert(name.into(), v);
                 }
             }

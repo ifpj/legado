@@ -1,5 +1,63 @@
 use super::*;
 
+#[test]
+fn long_literal_recovery_requires_current_instruction_paths_on_both_sides() {
+    let (_, _, mut plan) = fixture("x");
+    plan.meta["input_data_profile"]["flow-copy"] = json!([80, [0, 0], {}]);
+    let mut raw = Vec::new();
+    let append = |raw: &mut Vec<u8>, value: &str| {
+        let start = raw.len();
+        raw.extend([3 ^ 7, 11 ^ 7, 7, value.len() as u8 ^ 7]);
+        let mut seed = plan.format.seed(raw.len());
+        for b in value.bytes() {
+            raw.push((b.wrapping_add(seed as u8) ^ (seed >> 16) as u8) ^ 7);
+            seed = seed.wrapping_add(2654435769);
+        }
+        (start, raw.len())
+    };
+    let before = append(&mut raw, "known-before");
+    raw.extend([80 ^ 7, 7, 7, 80 ^ 7, 7, 7]);
+    let value = format!("{{border:{}}}", "a".repeat(80));
+    let middle = append(&mut raw, &value);
+    let following = raw.len();
+    raw.extend([80 ^ 7, 7, 7, 80 ^ 7, 7, 7]);
+    let after = append(&mut raw, "known-after");
+    let program = Program {
+        sha256: String::new(),
+        byte_length: raw.len(),
+        code_length: raw.len(),
+        strings: vec![],
+    };
+    let candidates = literals(&raw, &program, &plan, true, 65535, false).unwrap();
+    let known = candidates
+        .into_iter()
+        .filter(|l| l.start == before.0 || l.start == after.0)
+        .collect::<Vec<_>>();
+    assert_eq!(known.len(), 2);
+    for damaged in [false, true] {
+        let mut bytes = raw.clone();
+        if damaged {
+            bytes[following] = 99 ^ 7;
+        }
+        let mut all = known.clone();
+        all.push(Literal {
+            start: middle.0 - 1,
+            end: middle.0 + 4,
+            key: Some(7),
+            value: "n".into(),
+            packed: None,
+            continuation: 0,
+            pool_offset: 0,
+        });
+        recover_literals(&bytes, &program, &plan, &mut all).unwrap();
+        assert_eq!(
+            all.iter().any(|l| l.start == middle.0 && l.value == value),
+            !damaged
+        );
+        assert_eq!(all.iter().any(|l| l.start == middle.0 - 1), damaged);
+    }
+}
+
 // Synthetic bytecode: a five-byte pool candidate overlaps the start of
 // an inline string. No captured challenge state is used in this fixture.
 fn fixture(value: &str) -> (Vec<u8>, Program, Plan) {

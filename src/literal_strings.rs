@@ -105,19 +105,6 @@ fn decode(encoded: &str, mut seed: u16) -> Result<String> {
     String::from_utf16(&units).map_err(|_| Error::new("INVALID_DATA", "Invalid literal UTF-16"))
 }
 
-fn scope(mut node: Node<'_>) -> Node<'_> {
-    while let Some(parent) = node.parent() {
-        if matches!(
-            parent.kind(),
-            "function_declaration" | "function_expression" | "arrow_function" | "program"
-        ) {
-            return parent;
-        }
-        node = parent;
-    }
-    node
-}
-
 fn bindings<'a>(node: Node<'a>, source: &'a str) -> HashMap<&'a str, Vec<Node<'a>>> {
     let body = node.child_by_field_name("body").unwrap_or(node);
     let mut bindings: HashMap<_, Vec<_>> = HashMap::new();
@@ -157,15 +144,40 @@ fn bindings<'a>(node: Node<'a>, source: &'a str) -> HashMap<&'a str, Vec<Node<'a
     bindings
 }
 
+pub(crate) struct Prepared<'a> {
+    pub source: Cow<'a, str>,
+    pub tree: Option<tree_sitter::Tree>,
+}
 pub fn prepare(source: &str) -> Result<Cow<'_, str>> {
+    Ok(prepare_inner(source, false, None)?.source)
+}
+pub(crate) fn prepare_for_compile(source: &str) -> Result<Prepared<'_>> {
+    prepare_for_compile_reusing(source, None)
+}
+pub(crate) fn prepare_for_compile_reusing<'a>(
+    source: &'a str,
+    tree: Option<&tree_sitter::Tree>,
+) -> Result<Prepared<'a>> {
+    prepare_inner(source, true, tree)
+}
+fn prepare_inner<'a>(
+    source: &'a str,
+    retain_tree: bool,
+    previous: Option<&tree_sitter::Tree>,
+) -> Result<Prepared<'a>> {
     // Old initializers keep their original path without an extra syntax pass.
     if !source.contains("atob") || !source.contains("fromCharCode.apply") {
-        return Ok(Cow::Borrowed(source));
+        return Ok(Prepared {
+            source: Cow::Borrowed(source),
+            tree: None,
+        });
     }
     require(source.len() <= 8 * 1024 * 1024, "Initializer size limit")?;
-    let tree = crate::cpu::parse(&mut parser(), source)?;
+    let tree = crate::cpu::parse_reusing(&mut parser(), source, previous)?;
     require(!tree.root_node().has_error(), "Literal syntax unsupported")?;
     let nodes = walk(tree.root_node(), true);
+    let scopes = crate::constants::scope_index(&nodes, false);
+    let owner = |node: Node<'_>| scopes.get(&node.id()).copied().unwrap_or(tree.root_node());
     let mut recipes = HashMap::new();
     let mut owners = HashMap::new();
     for node in &nodes {
@@ -183,7 +195,7 @@ pub fn prepare(source: &str) -> Result<Cow<'_, str>> {
             continue;
         }
         if let Some(seed) = recipe_seed(unwrap(value), source) {
-            let owner = scope(*node);
+            let owner = owner(*node);
             recipes.insert(node.id(), seed);
             owners
                 .entry(owner.id())
@@ -191,7 +203,10 @@ pub fn prepare(source: &str) -> Result<Cow<'_, str>> {
         }
     }
     if recipes.is_empty() {
-        return Ok(Cow::Borrowed(source));
+        return Ok(Prepared {
+            source: Cow::Borrowed(source),
+            tree: retain_tree.then(|| tree.clone()),
+        });
     }
     let names: HashSet<_> = nodes
         .iter()
@@ -213,20 +228,20 @@ pub fn prepare(source: &str) -> Result<Cow<'_, str>> {
         if !names.contains(name) {
             continue;
         }
-        let mut owner = scope(*node);
+        let mut lexical_owner = owner(*node);
         let seed = loop {
             let local = owners
-                .entry(owner.id())
-                .or_insert_with(|| bindings(owner, source));
+                .entry(lexical_owner.id())
+                .or_insert_with(|| bindings(lexical_owner, source));
             if let Some(values) = local.get(name) {
                 break (values.len() == 1)
                     .then(|| recipes.get(&values[0].id()).copied())
                     .flatten();
             }
-            if owner.kind() == "program" {
+            if lexical_owner.kind() == "program" {
                 break None;
             }
-            owner = scope(owner);
+            lexical_owner = owner(lexical_owner);
         };
         let Some(seed) = seed else {
             continue;
@@ -249,8 +264,55 @@ pub fn prepare(source: &str) -> Result<Cow<'_, str>> {
         replacements.push((node.byte_range(), value));
     }
     if replacements.is_empty() {
-        return Ok(Cow::Borrowed(source));
+        return Ok(Prepared {
+            source: Cow::Borrowed(source),
+            tree: retain_tree.then(|| tree.clone()),
+        });
     }
+    let reused = if retain_tree {
+        let starts: Vec<_> = std::iter::once(0)
+            .chain(
+                source
+                    .bytes()
+                    .enumerate()
+                    .filter_map(|(i, b)| (b == b'\n').then_some(i + 1)),
+            )
+            .collect();
+        let point = |position| {
+            let row = starts.partition_point(|start| *start <= position) - 1;
+            tree_sitter::Point {
+                row,
+                column: position - starts[row],
+            }
+        };
+        let mut edited = tree.clone();
+        // Editing from the end keeps every earlier byte/point in the original
+        // coordinates, including scripts containing multibyte text or CRLF.
+        for (range, value) in replacements.iter().rev() {
+            crate::cpu::check()?;
+            let start_position = point(range.start);
+            let mut new_end_position = start_position;
+            for byte in value.bytes() {
+                if byte == b'\n' {
+                    new_end_position.row += 1;
+                    new_end_position.column = 0;
+                } else {
+                    new_end_position.column += 1;
+                }
+            }
+            edited.edit(&tree_sitter::InputEdit {
+                start_byte: range.start,
+                old_end_byte: range.end,
+                new_end_byte: range.start + value.len(),
+                start_position,
+                old_end_position: point(range.end),
+                new_end_position,
+            });
+        }
+        Some(edited)
+    } else {
+        None
+    };
     let mut output = String::with_capacity(output_len);
     let mut copied = 0;
     for (range, value) in replacements {
@@ -265,12 +327,47 @@ pub fn prepare(source: &str) -> Result<Cow<'_, str>> {
         output.len() <= 16 * 1024 * 1024,
         "Decoded initializer size limit",
     )?;
-    Ok(Cow::Owned(output))
+    Ok(Prepared {
+        source: Cow::Owned(output),
+        tree: reused,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_original_syntax_survives_literal_rewrites_and_is_reused_by_configuration_reads() {
+        let source=format!("var decode={RECIPE};var plain=decode(`LAsLWkoMQQ==`);_cf_chl_opt.TglCI7={{LgdCU7:'en-us',other:[1,2]}};");
+        let document = crate::html::Document::from(source.clone());
+        let tree = document.syntax().unwrap();
+        let shape = tree.root_node().to_sexp();
+        let prepared = prepare_for_compile_reusing(&document, Some(tree)).unwrap();
+        assert!(prepared.source.contains("plain=\"_0xa972\""));
+        assert_eq!(tree.root_node().to_sexp(), shape);
+        assert!(std::ptr::eq(tree, document.clone().syntax().unwrap()));
+        assert_eq!(
+            crate::static_data::assignment_document(&document, "_cf_chl_opt.TglCI7").unwrap(),
+            crate::static_data::assignment(&source, "_cf_chl_opt.TglCI7").unwrap()
+        );
+    }
+    #[test]
+    fn edited_tree_matches_full_parse_after_multiline_and_unicode_replacements() {
+        for source in [
+            format!("/*中文😀*/var decode={RECIPE};\r\nvar a=decode(\r\n`jBY9xPRejAarxHPl`\r\n);\nvar b=decode(`CV4BVHNXGlUWMQ==`);function shadow(decode){{return decode(`LAsLWkoMQQ==`)}}"),
+            format!("var decode={RECIPE};var a=17;"),
+            "var a=1;function atob(){return 'fromCharCode.apply'}".into(),
+        ] {
+            let prepared = prepare_for_compile(&source).unwrap();
+            assert_eq!(prepare(&source).unwrap(), prepared.source);
+            let incremental = crate::cpu::parse_reusing(&mut parser(), &prepared.source, prepared.tree.as_ref()).unwrap();
+            let complete = crate::cpu::parse(&mut parser(), &prepared.source).unwrap();
+            assert!(!incremental.root_node().has_error());
+            assert_eq!(incremental.root_node().to_sexp(), complete.root_node().to_sexp());
+            let positions = |tree: &tree_sitter::Tree| walk(tree.root_node(), true).into_iter().map(|n| (n.kind().to_string(), n.byte_range(), n.start_position(), n.end_position())).collect::<Vec<_>>();
+            assert_eq!(positions(&incremental), positions(&complete));
+        }
+    }
     #[test]
     fn literal_recipe_is_native_bounded_and_scope_sensitive() {
         let source = format!("var decode={RECIPE};var plain=decode(`LAsLWkoMQQ==`);function shadow(decode){{return decode(`LAsLWkoMQQ==`)}}");

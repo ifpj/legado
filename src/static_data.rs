@@ -159,6 +159,35 @@ pub fn assignment(source: &str, name: &str) -> Result<Option<Value>> {
         .set_language(&tree_sitter_javascript::LANGUAGE.into())
         .map_err(|e| Error::new("PARSER_ERROR", e.to_string()))?;
     let tree = crate::cpu::parse(&mut parser, source)?;
+    assignment_in_tree(source, name, &tree)
+}
+fn assignment_in_tree(source: &str, name: &str, tree: &tree_sitter::Tree) -> Result<Option<Value>> {
+    let window_name = format!("window.{name}");
+    if name != "__CF$cv$params" {
+        let mut occurrences = source.match_indices(name);
+        if let Some((at, _)) = occurrences.next() {
+            if occurrences.next().is_none() {
+                let mut node = tree
+                    .root_node()
+                    .descendant_for_byte_range(at, at + name.len());
+                for _ in 0..64 {
+                    let Some(current) = node else { break };
+                    if current.kind() == "assignment_expression" {
+                        if let (Some(left), Some(right)) = (
+                            current.child_by_field_name("left"),
+                            current.child_by_field_name("right"),
+                        ) {
+                            let target = &source[left.byte_range()];
+                            if target == name || target == window_name {
+                                return Ok(Some(literal(right, source, 0)?));
+                            }
+                        }
+                    }
+                    node = current.parent();
+                }
+            }
+        }
+    }
     let mut pending = vec![tree.root_node()];
     let mut matches = Vec::new();
     while let Some(node) = pending.pop() {
@@ -169,7 +198,7 @@ pub fn assignment(source: &str, name: &str) -> Result<Option<Value>> {
                 node.child_by_field_name("right"),
             ) {
                 let target = &source[left.byte_range()];
-                if target == name || target == format!("window.{name}") {
+                if target == name || target == window_name {
                     matches.push(literal(right, source, 0)?);
                     continue;
                 }
@@ -204,7 +233,7 @@ pub(crate) fn assignment_document(
         return Ok(None);
     }
     if !source.trim_start().starts_with('<') {
-        return assignment(source, name);
+        return assignment_in_tree(source, name, source.syntax()?);
     }
     let mut values = Vec::new();
     for script in &source.facts()?.script_texts {
@@ -320,6 +349,23 @@ pub(crate) fn object_data(source: &str, name: &str) -> Result<Option<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unique_assignment_lookup_matches_full_scan_and_keeps_quoted_names_and_duplicates_inert() {
+        let name = "_cf_chl_opt.TglCI7";
+        for source in [
+            "window._cf_chl_opt.TglCI7={LgdCU7:'en-us',other:[1,2]};",
+            "function f(){_cf_chl_opt.TglCI7={LgdCU7:'zh-cn'};}",
+            "var text='_cf_chl_opt.TglCI7';",
+            "/*_cf_chl_opt.TglCI7*/var other=1;",
+            "_cf_chl_opt.TglCI7={bad:()=>1};",
+        ] {
+            let fast = assignment(source, name);
+            let scanned = assignment(&format!("{source}/*{name}*/"), name);
+            assert_eq!(fast, scanned);
+        }
+        assert!(assignment("_cf_chl_opt.TglCI7={};window._cf_chl_opt.TglCI7={};", name).is_err());
+        assert!(assignment("_cf_chl_opt.TglCI7={LgdCU7:'en-us',bad:'\\uD800'};", name).is_err());
+    }
     #[test]
     fn object_members_reuse_syntax_without_relaxing_data_only_validation() {
         for member in [

@@ -6,8 +6,14 @@ use crate::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::{Node, Parser};
+mod character;
+mod opcode_cache;
+mod sealed;
+#[cfg(test)]
+mod transform_tests;
+mod wire_calls;
 
 pub fn integer<'a>(t: &Tables<'a>, n: Node<'a>) -> Result<i64> {
     let value = t.value(n)?.number()?;
@@ -49,19 +55,22 @@ pub fn operation<'a>(t: &Tables<'a>, n: Node<'a>, op: &str) -> Option<[Node<'a>;
         return None;
     }
     let args = children(child(n, "arguments").ok()?);
-    if args.len() != 2 {
+    if !(2..=8).contains(&args.len()) {
         return None;
     }
     let fn_node = child(n, "function").ok()?;
     let evaluated = t.value(fn_node);
     let f = evaluated.ok()?;
+    let prefix = args[..args.len() - 2]
+        .iter()
+        .map(|n| t.value(*n))
+        .collect::<Result<Vec<_>>>()
+        .ok()?;
+    let operands = &args[args.len() - 2..];
     let invoke = |a: i64, b: i64| {
-        t.invoke(
-            f.clone(),
-            vec![Constant::Number(a as f64), Constant::Number(b as f64)],
-            1,
-        )
-        .and_then(|v| {
+        let mut inputs = prefix.clone();
+        inputs.extend([Constant::Number(a as f64), Constant::Number(b as f64)]);
+        t.invoke(f.clone(), inputs, 1).and_then(|v| {
             if let Constant::Bool(v) = v {
                 Ok(i64::from(v))
             } else {
@@ -74,12 +83,12 @@ pub fn operation<'a>(t: &Tables<'a>, n: Node<'a>, op: &str) -> Option<[Node<'a>;
         .iter()
         .all(|(a, b)| invoke(*a, *b).ok() == arithmetic(op, *a, *b).ok())
     {
-        Some([args[0], args[1]])
+        Some([operands[0], operands[1]])
     } else if samples
         .iter()
         .all(|(a, b)| invoke(*a, *b).ok() == arithmetic(op, *b, *a).ok())
     {
-        Some([args[1], args[0]])
+        Some([operands[1], operands[0]])
     } else {
         None
     }
@@ -93,36 +102,17 @@ pub(crate) fn script_build(t: &Tables<'_>) -> Option<String> {
         .into_iter()
         .filter(|n| n.kind() == "call_expression")
     {
-        let Some(function) = call.child_by_field_name("function") else {
+        let Some((receiver, args)) = wire_calls::method(t, call, "toString", 1).ok().flatten()
+        else {
             continue;
         };
-        if !matches!(
-            function.kind(),
-            "member_expression" | "subscript_expression"
-        ) {
-            continue;
-        }
-        let method = function
-            .child_by_field_name("property")
-            .map(|n| t.text(n).to_string())
-            .or_else(|| {
-                function
-                    .child_by_field_name("index")
-                    .and_then(|n| t.value(n).ok()?.text().ok())
-            });
-        if method.as_deref() != Some("toString") {
-            continue;
-        }
-        let Some(arguments) = call.child_by_field_name("arguments") else {
-            continue;
-        };
-        let args = children(arguments);
         if args.len() != 1 || t.value(args[0]).and_then(|v| v.integer()) != Ok(16) {
             continue;
         }
-        if let Some(value) = function
-            .child_by_field_name("object")
-            .and_then(|n| t.value(n).ok()?.integer().ok())
+        if let Some(value) = t
+            .value(receiver)
+            .ok()
+            .and_then(|v| v.integer().ok())
             .filter(|n| *n >= 0 && *n < (1i64 << 48))
         {
             values.insert(format!("{value:012x}"));
@@ -134,7 +124,7 @@ pub(crate) fn script_build(t: &Tables<'_>) -> Option<String> {
         None
     }
 }
-fn data_reference<'a>(t: &Tables<'a>, node: Node<'a>) -> Option<String> {
+pub(crate) fn data_reference<'a>(t: &Tables<'a>, node: Node<'a>) -> Option<String> {
     let node = unwrap(node);
     if node.kind() == "identifier" {
         return Some(t.text(node).to_string());
@@ -152,59 +142,52 @@ fn data_reference<'a>(t: &Tables<'a>, node: Node<'a>) -> Option<String> {
     None
 }
 
+fn call_tail(mut value: Node<'_>) -> Option<Node<'_>> {
+    value = unwrap(value);
+    while value.kind() == "sequence_expression" {
+        value = unwrap(*children(value).last()?);
+    }
+    (value.kind() == "call_expression").then_some(value)
+}
 pub(crate) fn transform_name(t: &Tables<'_>) -> Result<String> {
+    let left_field = |n: Node<'_>| {
+        if n.kind() == "variable_declarator" {
+            "name"
+        } else {
+            "left"
+        }
+    };
+    let right_field = |n: Node<'_>| {
+        if n.kind() == "variable_declarator" {
+            "value"
+        } else {
+            "right"
+        }
+    };
     let mut candidates = HashSet::new();
-    for node in t
+    let assignments = t
         .all()
         .iter()
         .copied()
-        .into_iter()
-        .filter(|n| n.kind() == "assignment_expression")
-    {
-        let left = child(node, "left")?;
-        let right = unwrap(child(node, "right")?);
-        if right.kind() != "call_expression" {
-            continue;
+        .filter(|n| {
+            matches!(n.kind(), "assignment_expression" | "variable_declarator")
+                && n.child_by_field_name(right_field(*n))
+                    .is_some_and(|r| call_tail(r).is_some())
+        })
+        .collect::<Vec<_>>();
+    let mut writes = HashMap::<String, Vec<Node<'_>>>::new();
+    for assignment in &assignments {
+        if let Some(reference) = data_reference(t, child(*assignment, left_field(*assignment))?) {
+            writes.entry(reference).or_default().push(*assignment);
         }
-        let Some(target_reference) = data_reference(t, left) else {
+    }
+    let mut slices = HashMap::new();
+    for node in assignments {
+        let left = child(node, left_field(node))?;
+        let Some(right) = call_tail(child(node, right_field(node))?) else {
             continue;
         };
-        let target = t.text(left);
-        let args = children(child(right, "arguments")?);
-        let function = child(right, "function")?;
-        let helper = if args.len() == 1
-            && function.kind() == "identifier"
-            && data_reference(t, args[0]).as_ref() == Some(&target_reference)
-        {
-            Some(t.text(function).to_string())
-        } else {
-            let local = t.scope(right);
-            let globals = t.globals.borrow();
-            let identifiers = args
-                .iter()
-                .flat_map(|n| t.walk(*n, true))
-                .filter(|n| n.kind() == "identifier")
-                .map(|n| t.text(n))
-                .collect::<HashSet<_>>();
-            if !identifiers.contains(target) {
-                continue;
-            }
-            let unknown = identifiers
-                .into_iter()
-                .filter(|n| {
-                    !local.contains_key(*n)
-                        && !globals.contains_key(*n)
-                        && !matches!(*n, "undefined" | "Number" | "String" | "Math" | "Reflect")
-                        && *n != target
-                })
-                .collect::<HashSet<_>>();
-            if unknown.len() == 1 {
-                unknown.into_iter().next().map(String::from)
-            } else {
-                None
-            }
-        };
-        let Some(helper) = helper.filter(|s| (4..=64).contains(&s.len())) else {
+        let Some(target_reference) = data_reference(t, left) else {
             continue;
         };
         let mut owner = node.parent();
@@ -214,40 +197,94 @@ pub(crate) fn transform_name(t: &Tables<'_>) -> Result<String> {
             owner = owner.unwrap().parent();
         }
         let Some(owner) = owner else { continue };
-        for assignment in t
-            .walk(child(owner, "body")?, false)
+        let body = child(owner, "body")?;
+        let mut slice_candidates = Vec::new();
+        for assignment in writes
+            .get(&target_reference)
             .into_iter()
-            .filter(|n| n.kind() == "assignment_expression")
+            .flatten()
+            .copied()
+            .filter(|n| n.start_byte() >= body.start_byte() && n.end_byte() <= body.end_byte())
         {
-            if data_reference(t, child(assignment, "left")?).as_ref() != Some(&target_reference) {
+            let Some(value) = call_tail(child(assignment, right_field(assignment))?) else {
+                continue;
+            };
+            let bounds = slices
+                .entry(assignment.id())
+                .or_insert_with(|| wire_calls::slice_bounds(t, value));
+            match bounds {
+                Ok(None) => (),
+                _ => slice_candidates.push(bounds.clone()),
+            }
+        }
+        // A helper requires a same-owner slice of this exact target. Reject
+        // unrelated assignments before building their scopes and bindings.
+        // Preserve any slice error until the helper itself is a candidate.
+        if slice_candidates.is_empty() {
+            continue;
+        }
+        let target = t.text(left);
+        let args = children(child(right, "arguments")?);
+        let function = child(right, "function")?;
+        let helper = if args.len() == 1
+            && function.kind() == "identifier"
+            && data_reference(t, args[0]).as_ref() == Some(&target_reference)
+        {
+            Some(t.text(function).to_string())
+        } else {
+            let argument_nodes = args
+                .iter()
+                .flat_map(|n| t.walk(*n, true))
+                .collect::<Vec<_>>();
+            let references = argument_nodes
+                .iter()
+                .copied()
+                .filter(|n| data_reference(t, *n).as_ref() == Some(&target_reference))
+                .collect::<Vec<_>>();
+            if references.is_empty() {
                 continue;
             }
-            let value = unwrap(child(assignment, "right")?);
-            if value.kind() != "call_expression" {
-                continue;
+            let local = t.scope(right);
+            let globals = t.globals.borrow();
+            let identifiers = argument_nodes
+                .iter()
+                .copied()
+                .filter(|n| n.kind() == "identifier")
+                .map(|n| t.text(n))
+                .collect::<HashSet<_>>();
+            let unknown = identifiers
+                .into_iter()
+                .filter(|n| {
+                    local
+                        .get(*n)
+                        .or_else(|| globals.get(*n))
+                        .is_none_or(|v| matches!(v, Constant::Dynamic))
+                        && !matches!(*n, "undefined" | "Number" | "String" | "Math" | "Reflect")
+                        && *n != target
+                        && !references.iter().any(|r| {
+                            t.walk(*r, true)
+                                .iter()
+                                .any(|i| i.kind() == "identifier" && t.text(*i) == *n)
+                        })
+                })
+                .collect::<HashSet<_>>();
+            if unknown.len() == 1 {
+                unknown.into_iter().next().map(String::from)
+            } else {
+                None
             }
-            let callee = child(value, "function")?;
-            let args = children(child(value, "arguments")?);
-            if !matches!(callee.kind(), "subscript_expression" | "member_expression")
-                || args.len() != 2
-            {
+        };
+        let Some(helper) = helper.filter(|s| (1..=64).contains(&s.len())) else {
+            continue;
+        };
+        for bounds in slice_candidates {
+            let Some([start, end]) = bounds? else {
                 continue;
-            }
-            let prop = callee
-                .child_by_field_name("property")
-                .map(|n| t.text(n).to_string())
-                .or_else(|| {
-                    callee
-                        .child_by_field_name("index")
-                        .and_then(|n| t.value(n).ok()?.text().ok())
-                });
-            let (start, end) = (unwrap(args[0]), unwrap(args[1]));
+            };
+            let (start, end) = (unwrap(start), unwrap(end));
             let Some(start_reference) = data_reference(t, start) else {
                 continue;
             };
-            if prop.as_deref() != Some("slice") {
-                continue;
-            }
             if [0., 17., 255.].into_iter().all(|v| {
                 let mut env = t.scope(end);
                 let overrides = t
@@ -267,10 +304,11 @@ pub(crate) fn transform_name(t: &Tables<'_>) -> Result<String> {
 }
 fn polynomial<'a>(t: &Tables<'a>, value: Node<'a>, name: &str) -> Result<(u8, u32, u32, u32)> {
     let mut steps = HashSet::new();
+    let mut aliases = HashSet::new();
     for node in t.walk(value, true) {
         if let Some(pair) = operation(t, node, "+") {
             for [a, b] in [pair, [pair[1], pair[0]]] {
-                if t.text(unwrap(a)) == name {
+                if data_reference(t, a).as_deref() == Some(name) {
                     if let Ok(v) = integer(t, b) {
                         steps.insert(v);
                     }
@@ -278,6 +316,89 @@ fn polynomial<'a>(t: &Tables<'a>, value: Node<'a>, name: &str) -> Result<(u8, u3
             }
         }
     }
+    if steps.is_empty() {
+        let mut owner = value.parent();
+        while owner
+            .is_some_and(|n| !matches!(n.kind(), "function_declaration" | "function_expression"))
+        {
+            owner = owner.unwrap().parent();
+        }
+        if let Some(owner) = owner {
+            let nodes = t.walk(child(owner, "body")?, false);
+            for reference in t.walk(value, true) {
+                let Some(reference) = data_reference(t, reference) else {
+                    continue;
+                };
+                let writes = nodes
+                    .iter()
+                    .filter(|n| {
+                        n.end_byte() <= value.start_byte()
+                            && matches!(n.kind(), "assignment_expression" | "variable_declarator")
+                            && n.child_by_field_name(if n.kind() == "variable_declarator" {
+                                "name"
+                            } else {
+                                "left"
+                            })
+                            .is_some_and(|l| data_reference(t, l).as_ref() == Some(&reference))
+                            && n.child_by_field_name(if n.kind() == "variable_declarator" {
+                                "value"
+                            } else {
+                                "right"
+                            })
+                            .is_some()
+                    })
+                    .collect::<Vec<_>>();
+                if writes.len() != 1 {
+                    continue;
+                }
+                let rhs = child(
+                    *writes[0],
+                    if writes[0].kind() == "variable_declarator" {
+                        "value"
+                    } else {
+                        "right"
+                    },
+                )?;
+                let Some(pair) = operation(t, rhs, "+") else {
+                    continue;
+                };
+                for [a, b] in [pair, [pair[1], pair[0]]] {
+                    if data_reference(t, a).as_deref() == Some(name) {
+                        if let Ok(step) = integer(t, b) {
+                            steps.insert(step);
+                            aliases.insert(reference.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let references = |root: Node<'a>| {
+        t.walk(root, true)
+            .into_iter()
+            .filter_map(|n| {
+                if data_reference(t, n).as_deref() == Some(name) {
+                    Some((n.id(), false))
+                } else if data_reference(t, n).is_some_and(|reference| aliases.contains(&reference))
+                {
+                    Some((n.id(), true))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let overrides_for = |references: &[(usize, bool)], x: i64, step: i64| {
+        references
+            .iter()
+            .map(|(id, alias)| {
+                (
+                    *id,
+                    Constant::Number(if *alias { x } else { x - step } as f64),
+                )
+            })
+            .collect()
+    };
     require(
         steps.len() == 1,
         &format!(
@@ -289,11 +410,13 @@ fn polynomial<'a>(t: &Tables<'a>, value: Node<'a>, name: &str) -> Result<(u8, u3
     )?;
     let step = *steps.iter().next().unwrap();
     let scope = t.scope(value);
+    let value_references = references(value);
     let mut values = Vec::new();
     for x in 0..256i64 {
         let mut scope = scope.clone();
         scope.insert(name.into(), Constant::Number((x - step) as f64));
-        values.push(t.eval(value, &mut scope)?.integer()?)
+        let overrides = overrides_for(&value_references, x, step);
+        values.push(t.bound(value, &mut scope, overrides)?.integer()?)
     }
     let c = values[0];
     let difference = (values[2] - 2 * values[1] + c) & 255;
@@ -314,10 +437,12 @@ fn polynomial<'a>(t: &Tables<'a>, value: Node<'a>, name: &str) -> Result<(u8, u3
             if integer(t, mask) != Ok(255) {
                 continue;
             }
+            let unmasked_references = references(unmasked);
             let evaluate = |x: i64| {
                 let mut env = scope.clone();
                 env.insert(name.into(), Constant::Number((x - step) as f64));
-                t.eval(unmasked, &mut env)?.integer()
+                let overrides = overrides_for(&unmasked_references, x, step);
+                t.bound(unmasked, &mut env, overrides)?.integer()
             };
             if let (Ok(v0), Ok(v1), Ok(v2)) = (evaluate(0), evaluate(1), evaluate(2)) {
                 let full_q = (v2 - 2 * v1 + v0) / 2;
@@ -367,7 +492,11 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
         let attempt = (|| -> Result<Format> {
             let params = children(child(function, "parameters")?);
             require(!params.is_empty(), "Reader parameter")?;
-            let param = t.text(params[0]);
+            let param_names: HashSet<_> = params
+                .iter()
+                .filter(|n| n.kind() == "identifier")
+                .map(|n| t.text(*n))
+                .collect();
             let mut reader = None;
             for arrow in t.walk(function, true).into_iter().filter(|n| {
                 matches!(
@@ -381,7 +510,7 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
                     };
                     let left = unwrap(pair[0]);
                     if left.kind() != "subscript_expression"
-                        || t.text(child(left, "object")?) != param
+                        || !param_names.contains(t.text(child(left, "object")?))
                     {
                         continue;
                     }
@@ -403,7 +532,7 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
                         if let Some(state) = pair
                             .into_iter()
                             .map(unwrap)
-                            .find(|n| n.kind() == "identifier")
+                            .find(|n| data_reference(t, *n).is_some())
                         {
                             let reader_name = arrow
                                 .parent()
@@ -417,7 +546,47 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
                                         .map(|name| t.text(name).to_string())
                                 });
                             if let Some(reader_name) = reader_name {
-                                reader = Some((reader_name, t.text(state).to_string(), offset));
+                                let mut region = function;
+                                let mut ancestor = arrow.parent();
+                                while let Some(node) = ancestor {
+                                    if node == function {
+                                        break;
+                                    }
+                                    if node.kind() == "switch_case" {
+                                        let writes = t
+                                            .walk(node, false)
+                                            .iter()
+                                            .filter(|n| {
+                                                matches!(
+                                                    n.kind(),
+                                                    "assignment_expression" | "variable_declarator"
+                                                ) && n
+                                                    .child_by_field_name(
+                                                        if n.kind() == "assignment_expression" {
+                                                            "left"
+                                                        } else {
+                                                            "name"
+                                                        },
+                                                    )
+                                                    .is_some_and(|target| {
+                                                        data_reference(t, target)
+                                                            == data_reference(t, state)
+                                                    })
+                                            })
+                                            .count();
+                                        if writes >= 2 {
+                                            region = node;
+                                            break;
+                                        }
+                                    }
+                                    ancestor = node.parent();
+                                }
+                                reader = Some((
+                                    reader_name,
+                                    data_reference(t, state).unwrap(),
+                                    offset,
+                                    region,
+                                ));
                                 break;
                             }
                         }
@@ -427,13 +596,13 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
                     break;
                 }
             }
-            let (reader, state, offset) =
+            let (reader, state, offset, region) =
                 reader.ok_or_else(|| Error::new("UNKNOWN_CONSTANT", "Data reader identity"))?;
             require((0..=255).contains(&offset), "Data byte offset")?;
             let mut seeds = HashSet::new();
             let mut transition = None;
             let mut transition_errors = Vec::new();
-            for node in t.walk(function, false) {
+            for node in t.walk(region, false) {
                 if !matches!(node.kind(), "assignment_expression" | "variable_declarator") {
                     continue;
                 }
@@ -445,7 +614,7 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
                         "name"
                     },
                 )?;
-                if t.text(target) != state {
+                if data_reference(t, target).as_ref() != Some(&state) {
                     continue;
                 }
                 let Some(value) =
@@ -457,12 +626,24 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
                 else {
                     continue;
                 };
-                if let Ok(value) = integer(t, value) {
+                let reads_state = t
+                    .walk(value, true)
+                    .iter()
+                    .any(|n| data_reference(t, *n).as_ref() == Some(&state));
+                if let Ok(value) = integer(t, value).and_then(|v| {
+                    require(!reads_state, "State transition is not a seed")?;
+                    Ok(v)
+                }) {
                     seeds.insert(value);
                 } else {
                     match polynomial(t, value, &state) {
                         Ok(profile) => transition = Some(profile),
-                        Err(error) => transition_errors.push(error.message),
+                        Err(error) => transition_errors.push(format!(
+                            "{}; expression={}; state={}",
+                            error.message,
+                            t.text(value),
+                            state
+                        )),
                     }
                 }
             }
@@ -477,7 +658,7 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
             )?;
             let mut salts = HashSet::new();
             let changed_names: HashSet<_> = t
-                .walk(function, true)
+                .walk(region, true)
                 .into_iter()
                 .filter_map(|node| {
                     let name = match node.kind() {
@@ -485,18 +666,18 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
                         "augmented_assignment_expression" => node.child_by_field_name("left"),
                         _ => None,
                     }?;
-                    (name.kind() == "identifier").then(|| t.text(name))
+                    data_reference(t, name)
                 })
                 .collect();
-            for node in t.walk(function, true) {
+            for node in t.walk(region, true) {
                 if let Some(pair) = operation(t, node, "^") {
                     for [a, b] in [pair, [pair[1], pair[0]]] {
-                        if unwrap(b).kind() == "identifier"
-                            && (integer(t, b).is_err() || changed_names.contains(t.text(unwrap(b))))
-                        {
-                            if let Ok(v) = integer(t, a) {
-                                if (65536..(1i64 << 32)).contains(&v) && v != 2654435769 {
-                                    salts.insert(v);
+                        if let Some(reference) = data_reference(t, b) {
+                            if integer(t, b).is_err() || changed_names.contains(&reference) {
+                                if let Ok(v) = integer(t, a) {
+                                    if (65536..(1i64 << 32)).contains(&v) && v != 2654435769 {
+                                        salts.insert(v);
+                                    }
                                 }
                             }
                         }
@@ -509,7 +690,7 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
             )?;
             let mut xors = HashSet::new();
             let mut after = false;
-            for arrow in t.walk(function, true).into_iter().filter(|n| {
+            for arrow in t.walk(region, true).into_iter().filter(|n| {
                 matches!(
                     n.kind(),
                     "arrow_function" | "function_expression" | "function_declaration"
@@ -550,6 +731,25 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
                 xors.len() == 1,
                 &format!("Character XOR ambiguity: {xors:?}"),
             )?;
+            {
+                let orders = t
+                    .walk(region, true)
+                    .into_iter()
+                    .filter(|n| {
+                        matches!(
+                            n.kind(),
+                            "arrow_function" | "function_expression" | "function_declaration"
+                        )
+                    })
+                    .filter_map(|function| {
+                        character::order(t, function, &reader, *xors.iter().next().unwrap() as u8)
+                    })
+                    .collect::<HashSet<_>>();
+                require(orders.len() <= 1, "Character byte order ambiguity")?;
+                if let Some(order) = orders.iter().next() {
+                    after = *order == "after-subtract";
+                }
+            }
             let (step, mult, increment, q) = transition.unwrap();
             Ok(Format {
                 byte_offset: offset as u8,
@@ -582,14 +782,61 @@ pub(crate) fn format(t: &Tables<'_>) -> Result<Format> {
 fn opcode_encoding(t: &Tables<'_>, format: &Format) -> Result<Option<u32>> {
     let mut models = HashSet::new();
     let mut attempts = Vec::new();
+    let mut candidates = Vec::new();
     for function in t.all().iter().copied().filter(|node| {
-        node.kind() == "function_declaration" && node.end_byte() - node.start_byte() < 3000
+        node.kind() == "function_declaration" && node.end_byte() - node.start_byte() < 12000
     }) {
         let params = children(child(function, "parameters")?);
-        if params.len() != 3 || !params.iter().all(|n| n.kind() == "identifier") {
+        if !params.iter().all(|p| p.kind() == "identifier") {
             continue;
         }
-        let nodes = t.walk(child(function, "body")?, false);
+        let body = child(function, "body")?;
+        if params.len() == 3 {
+            candidates.push((function, body, params, Vec::new()));
+            continue;
+        }
+        if params.len() != 4 {
+            continue;
+        }
+        for switch in t
+            .walk(body, false)
+            .into_iter()
+            .filter(|n| n.kind() == "switch_statement")
+        {
+            let Some(pair) = operation(t, unwrap(child(switch, "value")?), "^") else {
+                continue;
+            };
+            let offset = if t.text(unwrap(pair[0])) == t.text(params[0]) {
+                integer(t, pair[1]).ok()
+            } else if t.text(unwrap(pair[1])) == t.text(params[0]) {
+                integer(t, pair[0]).ok()
+            } else {
+                None
+            };
+            let Some(offset) = offset else {
+                continue;
+            };
+            for case in children(child(switch, "body")?)
+                .into_iter()
+                .filter(|n| n.kind() == "switch_case")
+            {
+                let Ok(label) = integer(t, child(case, "value")?) else {
+                    continue;
+                };
+                candidates.push((
+                    function,
+                    case,
+                    params[1..].to_vec(),
+                    vec![Constant::Number(((label as i32) ^ (offset as i32)) as f64)],
+                ));
+            }
+        }
+    }
+    for (function, region, params, prefix) in candidates {
+        if params.len() != 3 {
+            continue;
+        }
+        let nodes = t.walk(region, false);
         let input = t.text(params[0]);
         let key = t.text(params[1]);
         let has_xor = nodes.iter().any(|n| {
@@ -603,7 +850,7 @@ fn opcode_encoding(t: &Tables<'_>, format: &Format) -> Result<Option<u32>> {
                 && child(*n, "operator").is_ok_and(|n| t.text(n) == "&=")
                 && child(*n, "right").is_ok_and(|n| integer(t, n) == Ok(7))
         });
-        if !has_xor || !has_mask || !t.text(function).contains(">>>") {
+        if !has_xor || !has_mask {
             continue;
         }
         let multipliers: HashSet<_> = nodes
@@ -621,8 +868,21 @@ fn opcode_encoding(t: &Tables<'_>, format: &Format) -> Result<Option<u32>> {
         let multiplier = *multipliers.iter().next().unwrap() as u32;
         let mut candidate = format.clone();
         candidate.opcode_multiplier = Some(multiplier);
+        let cache = opcode_cache::read(t, function, region, &params)?;
         let mut valid = true;
         'samples: for position in [0, 1, 17, 2354, 65535] {
+            let overrides = if let Some((read, fresh)) = cache {
+                let mut env = t.scope(fresh);
+                env.insert(t.text(params[2]).into(), Constant::Number(position as f64));
+                let value = t.eval(fresh, &mut env)?;
+                require(
+                    value.truth()? && value.integer().is_ok(),
+                    "Opcode cache value",
+                )?;
+                std::collections::HashMap::from([(read.id(), value)])
+            } else {
+                std::collections::HashMap::new()
+            };
             for key in [0, 1, 9, 127, 255] {
                 for value in [0, 1, 63, 128, 255] {
                     let expected = candidate.opcode(
@@ -630,16 +890,14 @@ fn opcode_encoding(t: &Tables<'_>, format: &Format) -> Result<Option<u32>> {
                         key as u8,
                         position,
                     );
+                    let mut args = prefix.clone();
+                    args.extend([
+                        Constant::Number(value as f64),
+                        Constant::Number(key as f64),
+                        Constant::Number(position as f64),
+                    ]);
                     let actual = t
-                        .invoke_bound(
-                            function,
-                            vec![
-                                Constant::Number(value as f64),
-                                Constant::Number(key as f64),
-                                Constant::Number(position as f64),
-                            ],
-                            std::collections::HashMap::new(),
-                        )
+                        .invoke_bound(function, args, overrides.clone())
                         .and_then(|v| v.integer());
                     if actual != Ok(expected as i64) {
                         attempts.push(format!("Opcode finite model: {actual:?}"));
@@ -663,12 +921,12 @@ fn opcode_encoding(t: &Tables<'_>, format: &Format) -> Result<Option<u32>> {
     Ok(models.into_iter().next())
 }
 
+#[cfg(test)]
 pub(crate) fn key_material(t: &Tables<'_>, encoded: &str, f: &Format) -> Result<Value> {
     // Every helper candidate is a current source identifier, and must have
     // a verified adjacent 16-byte literal under the rolling instruction key.
     let name = transform_name(t)?;
-    let names = HashSet::from([name.as_str()]);
-    recover_material(encoded, f, &names)
+    recover_material(encoded, f, &HashSet::from([name.as_str()]))
 }
 pub(crate) fn recover_material(encoded: &str, f: &Format, names: &HashSet<&str>) -> Result<Value> {
     let raw = STANDARD.decode(encoded)?;
@@ -680,7 +938,7 @@ pub(crate) fn recover_material(encoded: &str, f: &Format, names: &HashSet<&str>)
     let mut lengths = names
         .iter()
         .map(|name| name.len())
-        .filter(|n| (4..=64).contains(n))
+        .filter(|n| (1..=64).contains(n))
         .collect::<Vec<_>>();
     lengths.sort_unstable();
     lengths.dedup();
@@ -718,7 +976,7 @@ pub(crate) fn recover_material(encoded: &str, f: &Format, names: &HashSet<&str>)
     }
     if found.len() != 1 {
         return Err(Error {
-            details: json!({"helpers":names,"helperMatches":helper_matches,"maskMatches":mask_matches,"matches":found.len(),"codeLength":p.code_length,"format":f}),
+            details: json!({"helperMatches":helper_matches,"maskMatches":mask_matches,"matches":found.len(),"found":found.iter().map(|v|json!({"helper":v["helper"],"offset":v["literal_offset"]})).collect::<Vec<_>>(),"codeLength":p.code_length,"format":f}),
             ..Error::new(
                 "UNSUPPORTED_FORMAT",
                 "Adjacent key mask missing or ambiguous",
@@ -728,16 +986,20 @@ pub(crate) fn recover_material(encoded: &str, f: &Format, names: &HashSet<&str>)
     Ok(found.remove(0))
 }
 pub fn compile(source: &str, frame: bool) -> Result<Plan> {
-    let prepared = crate::literal_strings::prepare(source)?;
-    compile_prepared(prepared.as_ref(), frame)
+    let prepared = crate::literal_strings::prepare_for_compile(source)?;
+    compile_prepared(prepared.source.as_ref(), frame, prepared.tree)
 }
-pub(crate) fn compile_prepared(source: &str, frame: bool) -> Result<Plan> {
+pub(crate) fn compile_prepared(
+    source: &str,
+    frame: bool,
+    previous: Option<tree_sitter::Tree>,
+) -> Result<Plan> {
     crate::cpu::check()?;
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_javascript::LANGUAGE.into())
         .map_err(|e| Error::new("PARSER_ERROR", e.to_string()))?;
-    let tree = crate::cpu::parse(&mut parser, source)?;
+    let tree = crate::cpu::parse_reusing(&mut parser, source, previous.as_ref())?;
     require(
         !tree.root_node().has_error(),
         "Challenge syntax unsupported",
@@ -761,12 +1023,21 @@ pub(crate) fn compile_prepared(source: &str, frame: bool) -> Result<Plan> {
     let mut material = Vec::new();
     let mut programs = Vec::new();
     let mut material_errors = Vec::new();
+    let mut checked_programs = HashSet::new();
+    let mut helper = None;
     for value in &values {
         crate::cpu::check()?;
-        if value.len() > 64 && re(r"^[A-Za-z0-9+/]+={0,2}$").is_match(value) {
+        if value.len() > 64
+            && checked_programs.insert(value.as_str())
+            && re(r"^[A-Za-z0-9+/]+={0,2}$").is_match(value)
+        {
             if let Ok(raw) = STANDARD.decode(value) {
                 if let Ok(p) = program(&raw, &f, false) {
-                    match key_material(&tables, value, &f) {
+                    let recovered = match helper.get_or_insert_with(|| transform_name(&tables)) {
+                        Ok(name) => recover_material(value, &f, &HashSet::from([name.as_str()])),
+                        Err(error) => Err(error.clone()),
+                    };
+                    match recovered {
                         Ok(k) => {
                             if !material
                                 .iter()
@@ -788,7 +1059,7 @@ pub(crate) fn compile_prepared(source: &str, frame: bool) -> Result<Plan> {
     }
     if material.len() != 1 {
         return Err(Error {
-            details: json!({"candidates":material.len(),"errors":material_errors}),
+            details: json!({"candidates":material.len(),"errors":material_errors,"format":f}),
             ..Error::new("UNSUPPORTED_FORMAT", "Initializer key source ambiguous")
         });
     }
@@ -801,7 +1072,7 @@ pub(crate) fn compile_prepared(source: &str, frame: bool) -> Result<Plan> {
         meta["property_profile"] = profiles::properties(&tables, &f)?;
         meta["immediate_profile"] = profiles::immediate(&tables, &f)?;
         meta["input_data_profile"] = profiles::inputs(&tables, &f)?;
-        meta["boundaryProfileVersion"] = json!(2);
+        meta["boundaryProfileVersion"] = json!(4);
         if let Ok((opcode, salt)) = profiles::framed_salt(&tables) {
             meta["input_data_profile"]["flow-call"] = json!([opcode,[],{"salt":salt}]);
         }
@@ -811,13 +1082,93 @@ pub(crate) fn compile_prepared(source: &str, frame: bool) -> Result<Plan> {
         meta["declared_properties"] = declarations(&tables)?;
     }
     crate::cpu::check()?;
-    Ok(Plan {
+    let mut plan = Plan {
         format: f,
         meta,
         alphabet,
         modulus,
         flow,
-    })
+    };
+    if !frame && plan.meta["build"] == "c787ce48cf6b" {
+        plan.meta["sealed_literals"] = sealed::profile(&tables)?;
+        let encoded = values
+            .iter()
+            .find(|s| {
+                STANDARD.decode(s).is_ok_and(|raw| {
+                    crate::models::sha(raw)
+                        == plan.meta["key_material"]["program_sha256"]
+                            .as_str()
+                            .unwrap_or("")
+                })
+            })
+            .ok_or_else(|| Error::new("UNSUPPORTED_FORMAT", "Bootstrap program absent"))?;
+        let response = crate::data::Response::read(encoded, &plan, false)?;
+        let names = response
+            .literals
+            .iter()
+            .map(|l| l.value.as_str())
+            .collect::<HashSet<_>>();
+        let missing = [
+            "prototype",
+            "iframe",
+            "sandbox",
+            "allow-same-origin",
+            "toString",
+            "get",
+            "configurable",
+            "enumerable",
+        ]
+        .iter()
+        .filter(|v| !names.contains(**v))
+        .collect::<Vec<_>>();
+        require(missing.is_empty(), "Bootstrap declaration signature")?;
+        let assignments = response
+            .literals
+            .windows(2)
+            .filter(|pair| {
+                pair[0].value == "TRcGA3"
+                    && pair[0].end == pair[1].start
+                    && re(r"^[A-Za-z]{4,7}[0-9]$").is_match(&pair[1].value)
+            })
+            .collect::<Vec<_>>();
+        require(
+            assignments.len() == 2 && assignments[0][1].value != assignments[1][1].value,
+            "Bootstrap declaration marker ambiguity",
+        )?;
+        plan.meta["bootstrapFlags"] = json!({"TRcGA3":assignments[1][1].value});
+        // This protocol's bootstrap declares the JSON conversion marker in
+        // its first small return function, immediately after the eval name.
+        // Recover its current literal rather than borrowing browser state.
+        let marker = response
+            .literals
+            .windows(2)
+            .filter(|pair| {
+                pair[0].value == "eval" && re(r"^[A-Za-z]{4,7}[0-9]$").is_match(&pair[1].value)
+            })
+            .collect::<Vec<_>>();
+        require(
+            marker.len() == 1 && names.contains("GesyF4") && names.contains("toJSON"),
+            "Bootstrap JSON declaration",
+        )?;
+        plan.meta["bootstrapFlags"]["GesyF4"] = json!(marker[0][1].value);
+    }
+    Ok(plan)
+}
+pub(crate) fn current_sealed(source: &str, previous: Option<&tree_sitter::Tree>) -> Result<Value> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .map_err(|e| Error::new("PARSER_ERROR", e.to_string()))?;
+    let tree = crate::cpu::parse_reusing(&mut parser, source, previous)?;
+    require(
+        !tree.root_node().has_error(),
+        "Challenge syntax unsupported",
+    )?;
+    let syntax = Tables::syntax(tree.root_node(), source)?;
+    if let Ok(profile) = sealed::profile(&syntax) {
+        return Ok(profile);
+    }
+    sealed::profile(&Tables::new(tree.root_node(), source)?)
 }
 pub(crate) fn constant_json(v: Constant<'_>) -> Option<Value> {
     match v {
@@ -917,6 +1268,94 @@ pub(crate) fn declarations(t: &Tables<'_>) -> Result<Value> {
 mod format_tests {
     use super::*;
 
+    #[test]
+    fn indexed_wire_assignments_preserve_owner_bounds_and_ambiguity() {
+        let read = |source: &str| {
+            let mut parser = Parser::new();
+            parser
+                .set_language(&tree_sitter_javascript::LANGUAGE.into())
+                .unwrap();
+            let tree = parser.parse(source, None).unwrap();
+            transform_name(&Tables::new(tree.root_node(), source).unwrap())
+        };
+        let source = "function first(bytes,start){var key;key=bytes.slice(start,start+16);key=encode(key);}function other(bytes,start){var key;key=bytes.slice(start,start+17);key=unrelated(key);}";
+        assert_eq!(read(source).unwrap(), "encode");
+        assert_eq!(
+            read(&source.replace(
+                "key=bytes.slice(start,start+16)",
+                "key=(startZero=0,bytes.slice(start,start+16))"
+            ))
+            .unwrap(),
+            "encode"
+        );
+        assert!(read(&source.replace("start+17", "start+16")).is_err());
+        assert!(read(&source.replace("start+16", "start+15")).is_err());
+    }
+
+    #[test]
+    fn polynomial_array_aliases_use_the_definition_before_the_transition() {
+        let source="function reader(){var cells=[0,0,0,59];cells[1]=cells[3]+1;cells[3]=(cells[1]*cells[1]*37+cells[1]*215+222)&255;cells[1]=0;}";
+        let check = |source: &str| {
+            let mut p = Parser::new();
+            p.set_language(&tree_sitter_javascript::LANGUAGE.into())
+                .unwrap();
+            let tree = p.parse(source, None).unwrap();
+            let tables = Tables::new(tree.root_node(), source).unwrap();
+            let value = tables
+                .all()
+                .iter()
+                .find(|n| {
+                    n.kind() == "assignment_expression"
+                        && child(**n, "left").is_ok_and(|n| tables.text(n) == "cells[3]")
+                })
+                .and_then(|n| n.child_by_field_name("right"))
+                .unwrap();
+            polynomial(&tables, value, "cells[3]")
+        };
+        assert_eq!(check(source).unwrap(), (1, 215, 222, 37));
+        assert_eq!(
+            check(&source.replace("cells[1]*cells[1]", "cells[0+1]*cells[1]")).unwrap(),
+            (1, 215, 222, 37)
+        );
+        assert!(check(&source.replace("cells[3]+1", "cells[2]+1")).is_err());
+        assert!(check(&source.replace("cells[3]=(cells", "cells[1]=99;cells[3]=(cells")).is_err());
+    }
+
+    #[test]
+    fn position_hash_cache_recomputes_the_current_expression() {
+        let hash="function hash(position){position^=1612195754;position=(position^(position>>>16))*40503|0;position=(position^(position>>>13))*13849|0;return position^(position>>>16)}";
+        let body="function decode(value,key,position){var mask;var bias;var cached;return mask=255,bias=1,cached=table[position],cached||(cached=(hash(position)&mask)+bias,table[position]=cached),value^=(cached-bias^key*403)&mask,key&=7,(value>>>key|value<<8-key)&mask}";
+        for (changed, valid) in [
+            (body.to_string(), true),
+            (
+                body.replace("table[position]=cached", "table[key]=cached"),
+                false,
+            ),
+            (body.replace("cached-bias^key", "cached+bias^key"), false),
+            (
+                body.replace("table[position]=cached", "table[position]=cached+1"),
+                false,
+            ),
+            (
+                body.replace("hash(position)&mask", "hash(position+1)&mask"),
+                false,
+            ),
+        ] {
+            let source = format!("{hash}{changed}");
+            let mut parser = Parser::new();
+            parser
+                .set_language(&tree_sitter_javascript::LANGUAGE.into())
+                .unwrap();
+            let tree = parser.parse(&source, None).unwrap();
+            let t = Tables::new(tree.root_node(), &source).unwrap();
+            let f:Format=serde_json::from_value(json!({"byte_offset":37,"initial_key":191,"state_step":244,"state_multiplier":48294,"state_increment":31651,"hash_salt":1612195754u32,"char_xor":133,"state_quadratic":0,"char_mode":"before-subtract"})).unwrap();
+            if valid {
+                assert_eq!(opcode_encoding(&t, &f).unwrap(), Some(403));
+            } else {
+                assert!(opcode_encoding(&t, &f).is_err(), "{changed}");
+            }
+        }
+    }
     #[test]
     fn position_key_opcode_model_is_verified_and_inverts_all_candidates() {
         let source="function hash(position){position^=1612195754;position=(position^(position>>>16))*40503|0;position=(position^(position>>>13))*13849|0;return position^(position>>>16)}function decode(value,key,position){value^=(hash(position)^key*403)&255;key&=7;return (value>>>key|value<<8-key)&255}";

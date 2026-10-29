@@ -272,6 +272,13 @@ where
 }
 
 pub(crate) fn parse(parser: &mut tree_sitter::Parser, source: &str) -> Result<tree_sitter::Tree> {
+    parse_reusing(parser, source, None)
+}
+pub(crate) fn parse_reusing(
+    parser: &mut tree_sitter::Parser,
+    source: &str,
+    previous: Option<&tree_sitter::Tree>,
+) -> Result<tree_sitter::Tree> {
     check()?;
     let mut progress = |_: &tree_sitter::ParseState| {
         if stopped() {
@@ -282,7 +289,7 @@ pub(crate) fn parse(parser: &mut tree_sitter::Parser, source: &str) -> Result<tr
     };
     let tree = parser.parse_with_options(
         &mut |offset, _| &source.as_bytes()[offset..],
-        None,
+        previous,
         Some(tree_sitter::ParseOptions::new().progress_callback(&mut progress)),
     );
     check()?;

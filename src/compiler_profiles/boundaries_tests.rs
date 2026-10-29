@@ -25,6 +25,22 @@ fn primitive_boundaries_require_equality_and_no_additional_reads_or_dynamic_call
     });
 }
 #[test]
+fn empty_literal_register_address_can_use_audited_arithmetic() {
+    let source="function literals(raw,ip,key,regs){let tag=((raw[ip++]-20)&255)^key^96;let dest=((raw[ip++]-20)&255)^key^17;if(tag!==155){unknown();}else{regs[xor(dest,key)]=void 0;}}function xor(a,b){return a^b;}";
+    with_function(source, |t, n| {
+        assert_eq!(empty_literals_in(t, n, &format()).unwrap(), vec![251])
+    });
+    for changed in [
+        source.replace("return a^b;", "unknown();return a^b;"),
+        source.replace("xor(dest,key)", "unknown(dest,key)"),
+        source.replace("void 0", "raw[ip++]"),
+    ] {
+        with_function(&changed, |t, n| {
+            assert!(empty_literals_in(t, n, &format()).is_err())
+        });
+    }
+}
+#[test]
 fn jump_recovers_current_address_order_key_mask_and_sequence_tail() {
     let source="function jump(raw,ip,key,regs){let target;target=(unused=regs[0],(((raw[ip++]-20)&255)^key)<<8|(((raw[ip++]-20)&255)^key)<<16|(((raw[ip++]-20)&255)^key));regs[0]=target;regs[1]=((raw[ip]-20)&255)^key^93;}";
     with_function(source, |t, n| {
@@ -152,6 +168,17 @@ fn closure_header_derives_a_bounded_capture_count_from_the_current_reader() {
     with_function(&wrapped, |t, n| {
         assert!(closure_in(t, n, 45, &format()).is_ok())
     });
+    let selected = source
+        .replace("read(state)", "forward(7,read,state)")
+        .replace("function forward(7,read,state)", "function read(state)")
+        + "function forward(selector,f,state){switch(selector){case 7:return f(state)}}";
+    with_function(&selected, |t, n| {
+        assert!(closure_in(t, n, 45, &format()).is_ok())
+    });
+    with_function(
+        &selected.replace("forward(7,read,state)", "forward(7,read,other)"),
+        |t, n| assert!(closure_in(t, n, 45, &format()).is_err()),
+    );
     for bad in [
         source.replace("i<count", "i<=count"),
         source.replace("i++", "i--"),
@@ -164,6 +191,28 @@ fn closure_header_derives_a_bounded_capture_count_from_the_current_reader() {
     }
 }
 
+#[test]
+fn closure_header_uses_verified_dispatch_order_instead_of_source_order() {
+    let source="function closure(state,raw,ip,key){let order='dest|target|next|flags|count|loop'.split('|'),step=0,dest,target,next,flags,count,captures;for(;;){switch(order[step++]){case 'loop':captures=[];for(let i=0;i<count;i++){captures[i]=read(state)^state.l;}continue;case 'flags':flags=read(state)^119;continue;case 'next':next=read(state)^127;continue;case 'count':count=read(state)^80;continue;case 'target':target=(((raw[ip++]-20)&255)^key)<<16|(((raw[ip++]-20)&255)^key)<<8|(((raw[ip++]-20)&255)^key);continue;case 'dest':dest=read(state)^111;continue;}break;}}function read(state){return state.h[state.i]^((state.h[state.v][state.h[state.j]++]-20)&255);}";
+    with_function(source, |t, n| {
+        assert_eq!(
+            closure_in(t, n, 45, &format()).unwrap(),
+            json!([45,vec![0;7],{"count":6,"countMask":80,"maxCount":64}])
+        )
+    });
+    for bad in [
+        source.replace(
+            "dest|target|next|flags|count|loop",
+            "target|dest|next|flags|count|loop",
+        ),
+        source.replace("i<count", "i<=count"),
+        source.replace("i++", "i--"),
+    ] {
+        with_function(&bad, |t, n| {
+            assert!(closure_in(t, n, 45, &format()).is_err())
+        });
+    }
+}
 #[test]
 fn property_pool_boundary_requires_the_pool_branch_and_two_suffix_bytes() {
     let source=format!("function property(raw,ip){{let tag,pool,a,b;tag=raw[ip++];if(tag!==127){{let data=[{}];}}else{{pool=raw[ip++];}}a=raw[ip++];b=raw[ip++];}}",vec!["raw[ip++]";7].join(","));

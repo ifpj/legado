@@ -22,6 +22,8 @@ struct DocumentData {
     source: String,
     facts: OnceLock<Facts>,
     analyzing: Mutex<()>,
+    syntax: OnceLock<tree_sitter::Tree>,
+    parsing: Mutex<()>,
 }
 impl From<String> for Document {
     fn from(source: String) -> Self {
@@ -29,6 +31,8 @@ impl From<String> for Document {
             source,
             facts: OnceLock::new(),
             analyzing: Mutex::new(()),
+            syntax: OnceLock::new(),
+            parsing: Mutex::new(()),
         }))
     }
 }
@@ -57,6 +61,24 @@ impl serde::Serialize for Document {
     }
 }
 impl Document {
+    pub(crate) fn syntax(&self) -> Result<&tree_sitter::Tree> {
+        crate::cpu::check()?;
+        require(self.len() <= 8 * 1024 * 1024, "Script limit")?;
+        if let Some(tree) = self.0.syntax.get() {
+            return Ok(tree);
+        }
+        let _guard = crate::cpu::lock(&self.0.parsing)?;
+        if self.0.syntax.get().is_none() {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_javascript::LANGUAGE.into())
+                .map_err(|e| crate::Error::new("PARSER_ERROR", e.to_string()))?;
+            let tree = crate::cpu::parse(&mut parser, self)?;
+            crate::cpu::check()?;
+            let _ = self.0.syntax.set(tree);
+        }
+        Ok(self.0.syntax.get().unwrap())
+    }
     /// Move the final response body when its analysis users have finished.
     pub fn into_text(self) -> String {
         match Arc::try_unwrap(self.0) {

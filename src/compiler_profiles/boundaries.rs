@@ -213,7 +213,11 @@ pub(super) fn empty_literals_in<'a>(
                             | "do_statement"
                             | "new_expression"
                             | "throw_statement"
-                    ) || n.kind() == "call_expression" && t.value(*n).is_err()
+                    ) || n.kind() == "call_expression"
+                        && t.value(*n).is_err()
+                        && !["+", "-", "^", "&", "|", "<<", ">>", ">>>"]
+                            .iter()
+                            .any(|op| operation(t, *n, op).is_some())
                 })
             {
                 continue;
@@ -528,19 +532,31 @@ pub(super) fn closure_in<'a>(
                     || (args.len() == 2 && t.text(args[0]) == name && t.text(args[1]) == state)
                     || (args.len() == 3
                         && t.text(args[1]) == name
-                        && args[2].kind() == "array"
-                        && children(args[2]).len() == 1
-                        && t.text(children(args[2])[0]) == state
+                        && (t.text(args[2]) == state
+                            || (args[2].kind() == "array"
+                                && children(args[2]).len() == 1
+                                && t.text(children(args[2])[0]) == state))
                         && integer(t, args[0]).is_ok())
             })
             .collect();
         if calls.len() != 5 {
             continue;
         }
-        calls.sort_by_key(|n| n.start_byte());
+        let execution = super::execution_order(
+            t,
+            node,
+            calls.iter().chain(&reads).copied().collect(),
+            false,
+        )?;
+        let ranks = execution
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.id(), i))
+            .collect::<HashMap<_, _>>();
+        calls.sort_by_key(|n| ranks[&n.id()]);
         require(
-            calls[0].end_byte() < reads[0].start_byte()
-                && reads[2].end_byte() < calls[1].start_byte(),
+            ranks[&calls[0].id()] < ranks[&reads[0].id()]
+                && ranks[&reads[2].id()] < ranks[&calls[1].id()],
             "Closure header order",
         )?;
         let loops: Vec<_> = t
@@ -550,7 +566,11 @@ pub(super) fn closure_in<'a>(
                 matches!(
                     n.kind(),
                     "for_statement" | "while_statement" | "do_statement"
-                )
+                ) && n.start_byte() < calls[4].start_byte()
+                    && calls[4].end_byte() < n.end_byte()
+                    && !calls[..4].iter().chain(&reads).any(|header| {
+                        n.start_byte() < header.start_byte() && header.end_byte() < n.end_byte()
+                    })
             })
             .collect();
         require(
@@ -559,7 +579,7 @@ pub(super) fn closure_in<'a>(
         )?;
         let loop_node = loops[0];
         require(
-            calls[3].end_byte() < loop_node.start_byte()
+            ranks[&calls[3].id()] < ranks[&calls[4].id()]
                 && loop_node.start_byte() < calls[4].start_byte()
                 && calls[4].end_byte() < loop_node.end_byte(),
             "Closure capture input ownership",

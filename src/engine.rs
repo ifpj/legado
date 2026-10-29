@@ -3,7 +3,7 @@ use crate::{
     array,
     catalog::Catalog,
     completion::{self, Navigation},
-    data::{Plan, Response},
+    data::{PendingSealed, Plan, Response},
     epoch_ms,
     html::Document,
     models::{self, Context, Results},
@@ -56,11 +56,32 @@ fn protocol_error(code: &str, message: &str, status: u16, details: Value) -> Err
 pub fn initial(config: &Value, locale: &str) -> Value {
     json!({"TawNq4":config["cType"],"QZAb2":config["cvId"],"UqwKl5":0,"gRYZ0":0,"Pzgs5":"OoGu5","URVD0":0,"shUar7":0,"ghqno0":0,"pKaqh3":1,"RUtA1":config["cITimeS"],"MsSIK5":config["md"],"YVDgD5":config["cTplC"]==1,"nTlR0":{"frLR7":0,"WxIBU1":0,"rRfi2":0,"XWXu1":0,"Mfpwg0":0,"GCgUo2":0,"GkCb5":0,"gmGY7":0},"CtUv5":false,"TKcX8":false,"iWlWL9":"iDQN3","CAHKN0":"","vvfHL3":"[]","bkOl5":0,"gfOgY8":"tQth1","Bxtcq6":locale,"lffN9":"qCZq4","BuWQ0":{"LQfqz0":"chejv1"}})
 }
-async fn plan(source: Document, frame: bool, deadline: Instant) -> Result<Arc<Plan>> {
+async fn plan(
+    source: Document,
+    deadline: Instant,
+    defer: bool,
+) -> Result<(Arc<Plan>, Option<PendingSealed>)> {
     crate::cpu::run(deadline, move || {
-        Plan::analyze(&source, frame).map(Arc::new)
+        (if defer {
+            let tree = if source.contains("atob") && source.contains("fromCharCode.apply") {
+                Some(source.syntax()?)
+            } else {
+                None
+            };
+            Plan::prepare_parent(&source, tree)
+        } else {
+            Plan::analyze(&source, false).map(|p| (p, None))
+        })
+        .map(|(p, v)| (Arc::new(p), v))
     })
     .await
+}
+async fn validated_response<T>(
+    request: impl std::future::Future<Output = Result<T>>,
+    validate: impl std::future::Future<Output = Result<()>>,
+) -> Result<T> {
+    let (response, ()) = tokio::try_join!(request, validate)?;
+    Ok(response)
 }
 pub(crate) async fn recognize(
     response: &HttpResponse,
@@ -131,41 +152,54 @@ impl Engine {
         deadline: Instant,
         label: &str,
         unframed: bool,
+        validation: Option<PendingSealed>,
     ) -> Result<Response> {
         self.capture_generated(&format!(".{label}.payload.json"), || {
             Ok(serde_json::to_vec(payload)?)
         })?;
         let packet = c.encode(payload)?.into_bytes();
-        let response = s
-            .request(
-                "POST",
-                endpoint,
-                Some(packet),
-                &[
-                    ("cf-chl", string(&config["token"])?.into()),
-                    ("cf-chl-ra", "0".into()),
-                    ("referer", referer.into()),
-                    ("content-type", "text/plain;charset=UTF-8".into()),
-                    ("accept", "*/*".into()),
-                    ("sec-fetch-site", "same-origin".into()),
-                    ("sec-fetch-mode", "cors".into()),
-                    ("sec-fetch-dest", "empty".into()),
-                ],
-                deadline,
-            )
-            .await?;
-        self.capture(&response.content, &format!(".{label}.response"))?;
-        if response.status != 200 {
-            self.capture_generated(&format!(".{label}.rejected-payload.json"), || {
-                Ok(serde_json::to_vec(payload)?)
-            })?;
-            return Err(protocol_error(
-                "MANAGED_CONTINUATION_REJECTED",
-                "网站拒绝挑战提交",
-                422,
-                json!({"stage":label,"status":response.status}),
-            ));
-        }
+        let request = async {
+            let response = s
+                .request(
+                    "POST",
+                    endpoint,
+                    Some(packet),
+                    &[
+                        ("cf-chl", string(&config["token"])?.into()),
+                        ("cf-chl-ra", "0".into()),
+                        ("referer", referer.into()),
+                        ("content-type", "text/plain;charset=UTF-8".into()),
+                        ("accept", "*/*".into()),
+                        ("sec-fetch-site", "same-origin".into()),
+                        ("sec-fetch-mode", "cors".into()),
+                        ("sec-fetch-dest", "empty".into()),
+                    ],
+                    deadline,
+                )
+                .await?;
+            self.capture(&response.content, &format!(".{label}.response"))?;
+            if response.status != 200 {
+                self.capture_generated(&format!(".{label}.rejected-payload.json"), || {
+                    Ok(serde_json::to_vec(payload)?)
+                })?;
+                return Err(protocol_error(
+                    "MANAGED_CONTINUATION_REJECTED",
+                    "网站拒绝挑战提交",
+                    422,
+                    json!({"stage":label,"status":response.status}),
+                ));
+            }
+            Ok(response)
+        };
+        let validation = async move {
+            if let Some(validation) = validation {
+                crate::cpu::run(deadline, move || validation.validate()).await?;
+            }
+            Ok(())
+        };
+        // The first request needs only the current wire parameters and the
+        // exact-program layout. Never decode its response with an unchecked CV.
+        let response = validated_response(request, validation).await?;
         let (p, ray, label, capture) = (
             p.clone(),
             string(&config["ray"])?.to_string(),
@@ -344,7 +378,7 @@ impl Engine {
             require(script.status == 200, "Challenge script HTTP status")?;
             self.capture(&script.content, ".js")?;
             let analysis = Instant::now();
-            let p = plan(script.text.clone(), false, deadline).await?;
+            let (p, validation) = plan(script.text.clone(), deadline, !analyze).await?;
             details["managedProtocol"] = json!({"build":p.meta["build"],"nativeRust":true,"analysisMs":analysis.elapsed().as_millis() as u64,"compiledLayoutReused":p.meta["compiledLayoutReused"]==true});
             if analyze {
                 return Ok(Outcome {
@@ -361,6 +395,7 @@ impl Engine {
                     &script.text,
                     &p,
                     deadline,
+                    validation,
                 )
                 .await?;
             details["firstFlow"] = flow_details;
@@ -420,7 +455,10 @@ impl Engine {
         source: &Document,
         p: &Arc<Plan>,
         deadline: Instant,
+        validation: Option<PendingSealed>,
     ) -> Result<(HttpResponse, Value)> {
+        let mut phase_ms = json!({});
+        let first_started = Instant::now();
         for name in ["cType", "cvId", "cITimeS", "md", "cRay", "cH", "cFPWv"] {
             string(&config[name])?;
         }
@@ -432,15 +470,35 @@ impl Engine {
         )?;
         let born = epoch_ms();
         let source = source.clone();
+        let new_protocol = p.meta["build"] == "c787ce48cf6b";
         let locale = crate::cpu::run(deadline, move || {
-            static_data::assignment_document(&source, "_cf_chl_opt.bwDXz7")
+            static_data::assignment_document(
+                &source,
+                if new_protocol {
+                    "_cf_chl_opt.TglCI7"
+                } else {
+                    "_cf_chl_opt.bwDXz7"
+                },
+            )
         })
         .await?
-        .and_then(|v| v["wgqFb1"].as_str().map(String::from))
+        .and_then(|v| {
+            v[if new_protocol { "LgdCU7" } else { "wgqFb1" }]
+                .as_str()
+                .map(String::from)
+        })
         .unwrap_or_else(|| "en-us".into());
         let mut payload = initial(config, &locale);
+        if p.meta["build"] == "c787ce48cf6b" {
+            payload = json!({"gOeQ5":config["cType"],"mTMKo9":config["cvId"],"XNWt6":0,"zJHo8":0,"xAiT8":"Edqb9","LJfS7":0,"XLyWr5":0,"BVMeN7":0,"WqCj2":1,"wIgH5":config["cITimeS"],"RdXW8":config["md"],"xxPdJ4":config["cTplC"]==1,"nYPYj0":{"uXra5":0,"DkMeO5":0,"yVVkz8":0,"Tkjy2":0,"HszO7":0,"vXvkl0":0,"DPFYO4":0,"CjIiz8":0},"nYuU0":false,"BhiO6":false,"tgVOo4":"zZdzq6","kNTL3":"","hbRVt7":"[]","yGdKz7":0,"ZMiod6":"YqOw6","FvhZ6":locale});
+            merge(&mut payload, &p.meta["bootstrapFlags"]);
+        }
         let cipher = Cipher::new(&p.modulus, &p.alphabet, p.mask()?, None)?;
-        payload["mHsm4"] = json!(epoch_ms() - born);
+        if p.meta["build"] != "c787ce48cf6b" {
+            payload["mHsm4"] = json!(epoch_ms() - born);
+        } else {
+            payload["KHnWz9"] = json!(epoch_ms() - born);
+        }
         let endpoint = format!(
             "{}/cdn-cgi/challenge-platform/h/{}{}{}/{}",
             origin(&page.url)?,
@@ -449,6 +507,7 @@ impl Engine {
             string(&config["cRay"])?,
             string(&config["cH"])?
         );
+        let overlapped = validation.is_some();
         let data = self
             .submit(
                 &s,
@@ -461,9 +520,11 @@ impl Engine {
                 deadline,
                 "managed-first",
                 false,
+                validation,
             )
             .await?;
         let entered = epoch_ms();
+        phase_ms["firstSubmission"] = json!(first_started.elapsed().as_millis() as u64);
         let nav;
         let summary;
         if config["cType"] == "precursor_interstitial" {
@@ -491,6 +552,7 @@ impl Engine {
                 string(&config["cFPWv"])?,
                 string(&o["flow"])?
             );
+            let parent_started = Instant::now();
             let complete = self
                 .submit(
                     &s,
@@ -503,9 +565,11 @@ impl Engine {
                     deadline,
                     "precursor-completion",
                     false,
+                    None,
                 )
                 .await?;
             nav = completion::navigation(&complete, p, config, &page.url)?;
+            phase_ms["parentCompletion"] = json!(parent_started.elapsed().as_millis() as u64);
             summary = json!({"taskCount":1,"nativeComputedCount":1,"nativeTaskKinds":["native-precursor-telemetry"]});
         } else {
             let parameters = crate::cpu::run(deadline, move || data.root()).await?;
@@ -532,12 +596,21 @@ impl Engine {
                 &mut continuation,
                 &json!({"UORq8":config["cRay"],"UqwKl5":1,"qrKd7":[],"Hoqd1":0,"CAHKN0":"[]","TYrU7":0,"RxXRQ8":null,"jLEVv0":[],"ejOxj7":completion["parentState"],"xWFy3":completion::current_page_token(config)?,"CtUv5":false,"TKcX8":false,"vvfHL3":[],"1":{"hmwT6":parameters["hmwT6"],"nuvy8":parameters["nuvy8"],"pTaf7":3,"YwQJz9":"","XXao4":completion["widgetToken"],"NAmDV6":"","uGYqH4":entered,"dLrXX1":epoch_ms(),"NEMH8":epoch_ms()-entered},"mHsm4":epoch_ms()-born}),
             );
+            if p.meta["build"] == "c787ce48cf6b" {
+                continuation = payload.clone();
+                remove(&mut continuation, &["xxPdJ4", "yGdKz7", "ZMiod6"]);
+                merge(
+                    &mut continuation,
+                    &json!({"dXXrN6":config["cRay"],"XNWt6":1,"TwoO6":[],"cWAH0":0,"kNTL3":"[]","LoBqb5":0,"FQob1":null,"WdGLU4":{},"NglZ3":[],"sJhNC9":completion["parentState"],"slWOZ8":completion::current_page_token(config)?,"nYuU0":false,"BhiO6":false,"hbRVt7":[],"rXsMy3":parameters["vaZBm3"],"pAFSo0":parameters["yVlbA2"],"pnUb9":parameters["nidg0"],"1":{"tlwi7":parameters["hmwT6"],"rhUgi8":parameters["nuvy8"],"kYpkN9":3,"zzVN3":"","XHpVt4":completion["widgetToken"],"sSxR2":"","roTuJ3":entered,"DJme8":epoch_ms(),"helyQ4":epoch_ms()-entered},"KHnWz9":epoch_ms()-born}),
+                );
+            }
             let target = format!(
                 "{}/cdn-cgi/challenge-platform/h/{}{}",
                 origin(&page.url)?,
                 string(&config["cFPWv"])?,
                 string(&parameters["flow"])?
             );
+            let parent_started = Instant::now();
             let complete = self
                 .submit(
                     &s,
@@ -550,10 +623,13 @@ impl Engine {
                     deadline,
                     "parent-completion",
                     false,
+                    None,
                 )
                 .await?;
             nav = completion::navigation(&complete, p, config, &page.url)?;
+            phase_ms["parentCompletion"] = json!(parent_started.elapsed().as_millis() as u64);
         }
+        let navigation_started = Instant::now();
         let navigation_method = if nav.is_some() { "POST" } else { "GET" };
         let checked = if let Some(Navigation { url, body }) = nav {
             s.request(
@@ -581,9 +657,10 @@ impl Engine {
         };
         let checked_status = checked.status;
         self.capture(&checked.content, ".verification.html")?;
+        phase_ms["navigation"] = json!(navigation_started.elapsed().as_millis() as u64);
         Ok((
             checked,
-            json!({"nextStage":"native-parent-submitted","frameInitialization":summary,"finalNavigation":{"method":navigation_method,"status":checked_status}}),
+            json!({"nextStage":"native-parent-submitted","frameInitialization":summary,"phaseMs":phase_ms,"layoutValidationOverlapped":overlapped,"finalNavigation":{"method":navigation_method,"status":checked_status}}),
         ))
     }
     async fn frame(
@@ -596,6 +673,8 @@ impl Engine {
         deadline: Instant,
         embedded: Option<&crate::embedded::Widget>,
     ) -> Result<(Value, Value)> {
+        let mut phase_ms = json!({});
+        let frame_started = Instant::now();
         let sitekey = string(&parameters["sitekey"])?;
         require(
             re(r"^[a-f0-9]{12}$").is_match(build)
@@ -643,6 +722,7 @@ impl Engine {
             Ok((config, index))
         })
         .await?;
+        phase_ms["pageAndConfig"] = json!(frame_started.elapsed().as_millis() as u64);
         let analysis = Instant::now();
         let document = frame.text.clone();
         let p = crate::cpu::run(deadline, move || {
@@ -703,6 +783,7 @@ impl Engine {
             string(&config["ueNyz9"])?
         );
         let wire_config = json!({"ray":config["UORq8"],"token":config["ueNyz9"]});
+        let phase = Instant::now();
         let data = self
             .submit(
                 &s,
@@ -715,8 +796,11 @@ impl Engine {
                 deadline,
                 "frame-first",
                 false,
+                None,
             )
             .await?;
+        phase_ms["firstSubmission"] = json!(phase.elapsed().as_millis() as u64);
+        let phase = Instant::now();
         let context_data = (
             data,
             p.clone(),
@@ -743,6 +827,7 @@ impl Engine {
             Ok(((data, p, catalog, h, ph, fu, pu, mode), config, http_tasks))
         })
         .await?;
+        phase_ms["catalog"] = json!(phase.elapsed().as_millis() as u64);
         let mut pending = tokio::task::JoinSet::new();
         for task in http_tasks {
             pending.spawn(crate::network::inherit_context(crate::http_tasks::run(
@@ -752,6 +837,7 @@ impl Engine {
                 deadline,
             )));
         }
+        let phase = Instant::now();
         let (data, catalog, mut computed) = crate::cpu::run(deadline, move || {
             let (d, p, c, h, ph, fu, pu, m) = context_data;
             let computed = calculate_all(&Context {
@@ -767,6 +853,8 @@ impl Engine {
             Ok((d, c, computed))
         })
         .await?;
+        phase_ms["localTasks"] = json!(phase.elapsed().as_millis() as u64);
+        let phase = Instant::now();
         let mut records = Vec::new();
         while let Some(task) = pending.join_next().await {
             let (task, fields, entered, finished, record) =
@@ -775,13 +863,20 @@ impl Engine {
             computed.timings.insert(task.id, (entered, finished));
             records.push(record);
         }
+        phase_ms["remainingHttpTasks"] = json!(phase.elapsed().as_millis() as u64);
         let missing: Vec<_> = catalog
             .modules
             .iter()
             .filter(|m| !computed.fields.contains_key(&m.id))
             .map(|m| m.label.clone())
             .collect();
+        let task_durations = computed
+            .timings
+            .values()
+            .map(|(start, end)| end.saturating_sub(*start))
+            .collect::<Vec<_>>();
         let mut summary = json!({"status":200,"taskCount":catalog.modules.len(),"nativeComputedCount":computed.fields.len(),"nativeTaskKinds":computed.kinds,"nativeHttpTasks":records,"uncomputedTaskModules":missing,"allTaskResultsComputed":missing.is_empty(),"compiledLayoutReused":p.meta["compiledLayoutReused"]==true,"analysisMs":analysis_ms,"strictPureAlgorithmAcceptance":false,"solved":false});
+        summary["taskDurationsMs"] = json!(task_durations);
         if !missing.is_empty() {
             return Err(protocol_error(
                 "FRAME_DATA_UNSUPPORTED",
@@ -809,6 +904,7 @@ impl Engine {
         }
         selectors.push("script[nonce]".into());
         payload["vvfHL3"] = json!(selectors);
+        let phase = Instant::now();
         let envelopes = array(&catalog.parameters["tasks"])?;
         for (index, id) in catalog.order.iter().enumerate() {
             let mut fields = computed.fields.remove(id).unwrap();
@@ -832,10 +928,12 @@ impl Engine {
             payload[(index + 1).to_string()] = task;
         }
         payload["mHsm4"] = json!(epoch_ms() - born);
+        phase_ms["taskEnvelopes"] = json!(phase.elapsed().as_millis() as u64);
         let endpoint = format!(
             "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b{}",
             string(&catalog.parameters["flow"])?
         );
+        let phase = Instant::now();
         let followup = self
             .submit(
                 &s,
@@ -848,11 +946,14 @@ impl Engine {
                 deadline,
                 "frame-tasks",
                 true,
+                None,
             )
             .await?;
+        phase_ms["taskSubmission"] = json!(phase.elapsed().as_millis() as u64);
         let o = match completion::next_for(&followup, embedded.is_some())? {
             completion::Next::Done(done) => {
                 summary["workTaskRequested"] = json!(false);
+                summary["phaseMs"] = phase_ms;
                 return Ok((done, summary));
             }
             completion::Next::Work(operands) => operands,
@@ -930,10 +1031,13 @@ impl Engine {
                 deadline,
                 "frame-work",
                 true,
+                None,
             )
             .await?;
         summary["workTaskRequested"] = json!(true);
         summary["proofAttempts"] = json!(attempts);
+        phase_ms["work"] = json!(elapsed);
+        summary["phaseMs"] = phase_ms;
         Ok((
             if embedded.is_some() {
                 complete.widget_completion()?
@@ -1019,6 +1123,8 @@ impl Engine {
 }
 #[cfg(test)]
 mod capture_tests;
+#[cfg(test)]
+mod validation_tests;
 pub fn calculate_all(c: &Context<'_>) -> Result<Results> {
     crate::cpu::check()?;
     let mut result = models::calculate(c)?;

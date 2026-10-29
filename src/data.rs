@@ -8,6 +8,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{Mutex, OnceLock},
 };
+mod sealed;
 
 #[derive(Default)]
 struct LayoutCache {
@@ -326,10 +327,44 @@ pub struct Plan {
     pub modulus: String,
     pub flow: String,
 }
+pub(crate) struct PendingSealed {
+    source: String,
+    tree: Option<tree_sitter::Tree>,
+    expected: Value,
+}
+impl PendingSealed {
+    pub(crate) fn validate(self) -> Result<()> {
+        let current = crate::compiler::current_sealed(&self.source, self.tree.as_ref())?;
+        bind_current_sealed(&mut json!({"sealed_literals":self.expected}), current)
+    }
+}
+fn bind_current_sealed(meta: &mut Value, current: Value) -> Result<()> {
+    require(
+        current["version"] == meta["sealed_literals"]["version"]
+            && current["iv"] == meta["sealed_literals"]["iv"],
+        "Current sealed key differs from compiled layout",
+    )?;
+    meta["sealed_literals"] = current;
+    Ok(())
+}
 impl Plan {
     pub fn analyze(source: &str, frame: bool) -> Result<Self> {
-        let prepared = crate::literal_strings::prepare(source)?;
-        let source = prepared.as_ref();
+        Self::analyze_inner(source, frame, false, None).map(|(plan, _)| plan)
+    }
+    pub(crate) fn prepare_parent(
+        source: &str,
+        tree: Option<&tree_sitter::Tree>,
+    ) -> Result<(Self, Option<PendingSealed>)> {
+        Self::analyze_inner(source, false, true, tree)
+    }
+    fn analyze_inner(
+        source: &str,
+        frame: bool,
+        defer: bool,
+        original: Option<&tree_sitter::Tree>,
+    ) -> Result<(Self, Option<PendingSealed>)> {
+        let prepared = crate::literal_strings::prepare_for_compile_reusing(source, original)?;
+        let source = prepared.source.as_ref();
         static LAYOUTS: OnceLock<LayoutCache> = OnceLock::new();
         let layouts = LAYOUTS.get_or_init(|| {
             let data: Value =
@@ -366,22 +401,41 @@ impl Plan {
                     hashes.contains(string(&plan["key_material"]["program_sha256"])?)
                         && source.contains(string(&plan["build"])?)
                         && source.contains(string(&plan["key_material"]["helper"])?)
-                        && (!frame || plan["boundaryProfileVersion"] == 2),
+                        && (!frame || plan["boundaryProfileVersion"] == 4),
                 )
             },
             || {
-                let plan = crate::compiler::compile_prepared(source, frame)?;
-                let meta = plan.meta.clone();
+                let plan = crate::compiler::compile_prepared(source, frame, prepared.tree.clone())?;
+                let mut meta = plan.meta.clone();
+                // Declaration spelling is diagnostic, not layout identity.
+                // Every reuse below re-resolves the current lexical binding
+                // and verifies its CV, rather than trusting an old declaration.
+                if let Some(sealed) = meta["sealed_literals"].as_object_mut() {
+                    sealed.remove("binding");
+                }
                 compiled = Some(plan);
                 Ok(meta)
             },
         )?;
         if let Some(mut plan) = compiled {
             plan.meta["compiledLayoutReused"] = json!(false);
-            return Ok(plan);
+            return Ok((plan, None));
         }
+        let validation = if meta["build"] == "c787ce48cf6b" && defer {
+            Some(PendingSealed {
+                source: source.to_owned(),
+                tree: prepared.tree,
+                expected: meta["sealed_literals"].clone(),
+            })
+        } else {
+            if meta["build"] == "c787ce48cf6b" {
+                let current = crate::compiler::current_sealed(source, prepared.tree.as_ref())?;
+                bind_current_sealed(&mut meta, current)?;
+            }
+            None
+        };
         meta["compiledLayoutReused"] = json!(reused);
-        Self::from_layout(source, meta)
+        Ok((Self::from_layout(source, meta)?, validation))
     }
     pub(crate) fn from_layout(source: &str, meta: Value) -> Result<Self> {
         fn one(source: &str, pat: &str) -> Result<String> {
@@ -415,6 +469,47 @@ impl Plan {
             .iter()
             .map(|v| v.as_u64().unwrap_or_default() as u8)
             .collect())
+    }
+}
+#[cfg(test)]
+mod sealed_layout_reuse_tests {
+    use super::*;
+    #[test]
+    fn equivalent_current_declarations_rebind_but_changed_keys_and_missing_proofs_fail() {
+        let source = "function outer(){var renamed=[7-6,2,3,4,5,6,7,8];function pack(which,input){return [input.bytes,1,2,3,4,[renamed[0],renamed[1],renamed[2],renamed[3],renamed[4],renamed[5],renamed[6],renamed[7]]];}}";
+        let current = crate::compiler::current_sealed(source, None).unwrap();
+        let expected = json!({"iv":[1,2,3,4,5,6,7,8],"version":1});
+        PendingSealed {
+            source: source.into(),
+            tree: None,
+            expected: expected.clone(),
+        }
+        .validate()
+        .unwrap();
+        assert!(PendingSealed {
+            source: source.replace("7-6", "7-5"),
+            tree: None,
+            expected
+        }
+        .validate()
+        .is_err());
+        let mut meta = json!({"sealed_literals":{"iv":[1,2,3,4,5,6,7,8],"version":1,"binding":"old=[1,2,3,4,5,6,7,8]"}});
+        bind_current_sealed(&mut meta, current.clone()).unwrap();
+        assert_eq!(meta["sealed_literals"], current);
+        assert!(meta["sealed_literals"]["binding"]
+            .as_str()
+            .unwrap()
+            .starts_with("renamed="));
+        let changed = crate::compiler::current_sealed(&source.replace("7-6", "7-5"), None).unwrap();
+        assert!(bind_current_sealed(&mut meta, changed).is_err());
+        assert!(
+            crate::compiler::current_sealed(&source.replace("renamed[4]", "renamed[3]"), None)
+                .is_err()
+        );
+        assert!(crate::compiler::current_sealed(&source.replace("7-6", "input[0]"), None).is_err());
+        assert!(
+            bind_current_sealed(&mut meta, json!({"iv":[1,2,3,4,5,6,7,8],"version":2})).is_err()
+        );
     }
 }
 #[derive(Clone, Debug, Serialize)]
@@ -638,7 +733,16 @@ fn literals_excluding(
             continue;
         }
         let mut candidates = Vec::new();
+        let mut decoded_keys = [0u64; 4];
         for &(_, key) in keys.at(f, raw[start], start) {
+            // Different incoming states can converge after the polynomial
+            // transition. They describe one decoding candidate, not ambiguity.
+            let bucket = &mut decoded_keys[(key >> 6) as usize];
+            let bit = 1u64 << (key & 63);
+            if *bucket & bit != 0 {
+                continue;
+            }
+            *bucket |= bit;
             if f.byte(raw[start + slot], key) != tag {
                 continue;
             }
@@ -671,6 +775,31 @@ fn literals_excluding(
                 let desc = descriptor(raw, &mut pos, f, key)?;
                 let size = (desc & 65535) as usize;
                 let wide = desc & 65536 != 0;
+                if desc & 131072 != 0 && plan.meta["build"] == "c787ce48cf6b" {
+                    require(
+                        desc <= 262143
+                            && !wide
+                            && size <= max_units
+                            && pos + size + 34 <= p.code_length,
+                        "Sealed descriptor",
+                    )?;
+                    work += size + 34;
+                    require(work <= max_work, "Literal operation budget")?;
+                    let iv = serde_json::from_value(plan.meta["sealed_literals"]["iv"].clone())?;
+                    let value = sealed::decode(raw, pos, size, key, f.char_xor, f, iv)?;
+                    pos += size + 34;
+                    let frag = fragment(&value)
+                        .ok_or_else(|| Error::new("INVALID_DATA", "Sealed fragment"))?;
+                    return Ok(Literal {
+                        key: Some(key),
+                        start,
+                        end: pos,
+                        value,
+                        packed: Some(frag.0),
+                        continuation: frag.1,
+                        pool_offset: frag.2,
+                    });
+                }
                 require(
                     desc <= 131071
                         && size <= max_units
@@ -845,16 +974,32 @@ fn recover_literals_excluding(
         .collect();
     let seen: HashSet<_> = all.iter().map(|l| (l.start, l.value.clone())).collect();
     let mut budget = 8 * 1024 * 1024usize;
-    for l in literals_excluding(
+    let candidates = literals_excluding(
         raw,
         program,
         plan,
         true,
-        64,
+        65535,
         false,
         8 * 1024 * 1024,
         excluded,
-    )? {
+    )?;
+    let known: HashSet<_> = all
+        .iter()
+        .filter(|l| l.packed.is_some() || l.value.len() >= 8)
+        .map(|l| l.start)
+        .collect();
+    let mut proofs = Vec::new();
+    conflicting_literals_proving(raw, &candidates, plan, excluded, &mut proofs)?;
+    let incoming: HashSet<_> = proofs
+        .iter()
+        .filter_map(|(from, to)| known.contains(from).then_some(*to).flatten())
+        .collect();
+    let outgoing: HashSet<_> = proofs
+        .iter()
+        .filter_map(|(from, to)| to.is_none_or(|to| known.contains(&to)).then_some(*from))
+        .collect();
+    for l in candidates {
         crate::cpu::check()?;
         if l.packed.is_some()
             || seen.contains(&(l.start, l.value.clone()))
@@ -863,13 +1008,15 @@ fn recover_literals_excluding(
             continue;
         }
         let identifier = re(r"^[A-Za-z0-9_$]{4,64}$").is_match(&l.value);
-        let authenticated = if !identifier && !l.value.is_empty() {
+        let bounded_short = l.value.encode_utf16().count() <= 64;
+        let anchored = incoming.contains(&l.start) && outgoing.contains(&l.start);
+        let authenticated = if !identifier && !l.value.is_empty() && bounded_short {
             literal_call_anchor(raw, plan, &l, &mut budget)?
         } else {
             false
         };
-        if identifier || authenticated {
-            if authenticated {
+        if identifier || authenticated || anchored {
+            if authenticated || anchored {
                 // A short pool-reference false positive can hide an inline
                 // string. The following call authenticates the latter's key
                 // and exact endpoint; do not keep its overlapping competitor.
@@ -934,7 +1081,6 @@ fn response_literals(raw: &[u8], program: &Program, plan: &Plan) -> Result<Vec<L
     all.retain(|l| !conflicts.contains(&l.start));
     Ok(all)
 }
-
 #[derive(Clone)]
 pub struct Response {
     pub raw: Vec<u8>,
@@ -1180,6 +1326,15 @@ fn conflicting_literals_with_spans(
     plan: &Plan,
     checked: &[(usize, usize)],
 ) -> Result<HashSet<usize>> {
+    conflicting_literals_proving(raw, literals, plan, checked, &mut Vec::new())
+}
+fn conflicting_literals_proving(
+    raw: &[u8],
+    literals: &[Literal],
+    plan: &Plan,
+    checked: &[(usize, usize)],
+    proofs: &mut Vec<(usize, Option<usize>)>,
+) -> Result<HashSet<usize>> {
     let profile = &plan.meta["input_data_profile"];
     if profile.is_null() {
         return Ok(HashSet::new());
@@ -1187,12 +1342,22 @@ fn conflicting_literals_with_spans(
     let mut conflicts = HashSet::new();
     let f = &plan.format;
     let mut budget = 60000usize;
+    let mut ordered = literals.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|l| l.start);
+    let packed_starts = ordered
+        .iter()
+        .filter(|l| l.packed.is_some())
+        .map(|l| l.start)
+        .collect::<Vec<_>>();
     let commit =
         |spans: &[(usize, usize)], branches: &HashSet<usize>, conflicts: &mut HashSet<usize>| {
             for (a, b) in spans {
-                for l in literals.iter().filter(|l| {
-                    *a <= l.start && l.start < *b && (l.packed.is_none() || branches.contains(a))
-                }) {
+                let lo = ordered.partition_point(|l| l.start < *a);
+                for l in ordered[lo..]
+                    .iter()
+                    .take_while(|l| l.start < *b)
+                    .filter(|l| l.packed.is_none() || branches.contains(a))
+                {
                     conflicts.insert(l.start);
                 }
             }
@@ -1247,7 +1412,8 @@ fn conflicting_literals_with_spans(
                         break;
                     }
                     if spans.len() >= 2 {
-                        commit(&spans, &branches, &mut conflicts)
+                        commit(&spans, &branches, &mut conflicts);
+                        proofs.push((anchor.start, Some(position)));
                     }
                     break;
                 }
@@ -1408,16 +1574,18 @@ fn conflicting_literals_with_spans(
                         };
                         position = end;
                         spans.push((at, position));
-                        commit(&spans, &branches, &mut conflicts)
+                        commit(&spans, &branches, &mut conflicts);
+                        proofs.push((anchor.start, None));
                     }
                     _ => {
                         position += 1 + masks.len();
                         spans.push((at, position));
                     }
                 }
-                if literals
-                    .iter()
-                    .any(|l| l.packed.is_some() && at <= l.start && l.start < position.min(at + 8))
+                let next = packed_starts.partition_point(|start| *start < at);
+                if packed_starts
+                    .get(next)
+                    .is_some_and(|start| *start < position.min(at + 8))
                 {
                     break;
                 }

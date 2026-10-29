@@ -34,6 +34,43 @@ fn embedded_token(values: &[&str]) -> Result<String> {
 mod embedded_completion_tests {
     use super::*;
     #[test]
+    fn form_fields_are_bound_to_the_declared_inputs() {
+        let names = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];
+        let extra = "d".repeat(64);
+        let token = format!("{}-1700000000-1.0.1.1-{}", "A".repeat(80), "B".repeat(80));
+        let values: Vec<&str> = vec![
+            "form",
+            "action",
+            "method",
+            "POST",
+            "enctype",
+            "application/x-www-form-urlencoded",
+            "input",
+            "hidden",
+            &names[0],
+            "input",
+            "hidden",
+            &names[1],
+            "input",
+            "hidden",
+            &names[2],
+            &token,
+            &extra,
+            &token,
+        ];
+        assert_eq!(form_fields(&values, 0).unwrap(), ([8, 11, 14], 15));
+        let mut duplicate = values.clone();
+        duplicate[11] = &names[0];
+        assert!(form_fields(&duplicate, 0).is_err());
+        let mut wrong = values.clone();
+        wrong[9] = "div";
+        assert!(form_fields(&wrong, 0).is_err());
+        let mut missing = values.clone();
+        missing[15] = "short";
+        assert!(form_fields(&missing, 0).is_err());
+        assert!(form_fields(&[], 0).is_err());
+    }
+    #[test]
     fn completion_token_is_bound_to_the_complete_message_not_stoken() {
         let token = format!("1.{}", "A".repeat(120));
         let stoken = format!("1.{}", "B".repeat(120));
@@ -195,6 +232,31 @@ pub struct Navigation {
     pub url: String,
     pub body: Vec<u8>,
 }
+fn form_fields(values: &[&str], start: usize) -> Result<([usize; 3], usize)> {
+    let a = start + 8;
+    let b = a + 3;
+    let c = b + 3;
+    let token = c + 1;
+    let names = [a, b, c].map(|i| values.get(i).copied().unwrap_or(""));
+    require(
+        names
+            .iter()
+            .all(|name| re(r"^[a-f0-9]{64}$").is_match(name))
+            && names.iter().collect::<HashSet<_>>().len() == 3
+            && values.get(token).is_some_and(|v| {
+                (100..=16384).contains(&v.len())
+                    && re(r"^[A-Za-z0-9_.-]+-[0-9]{10}-1\.0\.1\.1-[A-Za-z0-9_.-]+$").is_match(v)
+            }),
+        "Parent form fields",
+    )?;
+    require(
+        values[a - 2..a] == ["input", "hidden"]
+            && values[a + 1..b] == ["input", "hidden"]
+            && values[b + 1..c] == ["input", "hidden"],
+        "Parent form order",
+    )?;
+    Ok(([a, b, c], token))
+}
 pub fn navigation(
     data: &Response,
     plan: &Plan,
@@ -211,8 +273,10 @@ pub fn navigation(
         return Ok(None);
     }
     require(
-        plan.meta["build"] == "d2d3316b729e"
-            && data.program.code_length <= 8192
+        matches!(
+            plan.meta["build"].as_str(),
+            Some("d2d3316b729e" | "c787ce48cf6b")
+        ) && data.program.code_length <= 8192
             && !values.contains(&"fail"),
         "Unsupported parent navigation format",
     )?;
@@ -231,35 +295,7 @@ pub fn navigation(
         values.get(start..start + expected.len()) == Some(expected.as_slice()),
         "Parent form declaration",
     )?;
-    let fields: Vec<_> = values
-        .iter()
-        .enumerate()
-        .filter(|(i, v)| *i > start && re(r"^[a-f0-9]{64}$").is_match(v))
-        .collect();
-    let tokens: Vec<_> = values
-        .iter()
-        .enumerate()
-        .filter(|(i, v)| {
-            *i > start
-                && (100..=16384).contains(&v.len())
-                && re(r"^[A-Za-z0-9_.-]+-[0-9]{10}-1\.0\.1\.1-[A-Za-z0-9_.-]+$").is_match(v)
-        })
-        .collect();
-    require(
-        fields.len() == 3
-            && fields.iter().map(|(_, v)| *v).collect::<HashSet<_>>().len() == 3
-            && tokens.len() == 1,
-        "Parent form fields",
-    )?;
-    let (a, b, c) = (fields[0].0, fields[1].0, fields[2].0);
-    require(
-        a >= 2
-            && values[a - 2..a] == ["input", "hidden"]
-            && values[a + 1..b] == ["input", "hidden"]
-            && values[b + 1..c] == ["input", "hidden"]
-            && tokens[0].0 == c + 1,
-        "Parent form order",
-    )?;
+    let ([a, b, c], token) = form_fields(&values, start)?;
     let before = validate_url(page_url)?;
     let target = before
         .join(config["fa"].as_str().unwrap_or(""))
@@ -284,11 +320,11 @@ pub fn navigation(
         "Form does not belong to current page",
     )?;
     let mut body = url::form_urlencoded::Serializer::new(String::new());
-    body.append_pair(fields[0].1, string(&config["md"])?);
+    body.append_pair(values[a], string(&config["md"])?);
     if let Some(v) = config["mdrd"].as_str().filter(|v| !v.is_empty()) {
-        body.append_pair(fields[1].1, v);
+        body.append_pair(values[b], v);
     }
-    body.append_pair(fields[2].1, tokens[0].1);
+    body.append_pair(values[c], values[token]);
     Ok(Some(Navigation {
         url: target.into(),
         body: body.finish().into_bytes(),

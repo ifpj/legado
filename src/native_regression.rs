@@ -58,16 +58,23 @@ fn compiled_layouts_contain_no_wire_credentials_and_rehydrate_current_parameters
     let layouts: serde_json::Value =
         serde_json::from_str(include_str!("../profiles/protocol-layouts-v1.json")).unwrap();
     assert_eq!(layouts["version"], 1);
+    let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-$";
+    let modulus = format!("0x00{}", "8".to_string() + &"0".repeat(255));
+    let source = format!("'{alphabet}';'{modulus}';'/fo/1:2:fresh/'");
     for row in layouts["layouts"].as_array().unwrap() {
         let plan = data::normalize(&row["plan"]).unwrap();
         assert!(plan["alphabet"].is_null() || plan["alphabet"] == "");
         assert!(plan["modulus"].is_null() || plan["modulus"] == 0);
         assert!(plan["flow_prefix"].is_null() || plan["flow_prefix"] == "");
+        for name in ["config", "token", "cookies", "response", "body", "answers"] {
+            assert!(plan.get(name).is_none(), "layout contains {name}");
+        }
+        let hydrated = data::Plan::from_layout(&source, plan).unwrap();
+        assert_eq!(hydrated.alphabet, alphabet);
+        assert_eq!(hydrated.modulus, modulus);
+        assert_eq!(hydrated.flow, "/fo/1:2:fresh/");
     }
     let meta = data::normalize(&layouts["layouts"][0]["plan"]).unwrap();
-    let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-$";
-    let modulus = format!("0x00{}", "8".to_string() + &"0".repeat(255));
-    let source = format!("'{alphabet}';'{modulus}';'/fo/1:2:fresh/'");
     let plan = data::Plan::from_layout(&source, meta.clone()).unwrap();
     assert_eq!(plan.alphabet, alphabet);
     assert_eq!(plan.modulus, modulus);

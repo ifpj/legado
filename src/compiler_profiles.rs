@@ -200,7 +200,14 @@ fn ordered_reads_impl<'a>(
         .filter(|r| r.len() == count && (!validate || r.iter().all(|r| operand(t, *r, f).is_ok())))
         .collect();
     require(groups.len() == 1, "Raw byte array ownership")?;
-    let mut reads = groups.remove(0);
+    execution_order(t, node, groups.remove(0), outer_cases)
+}
+pub(super) fn execution_order<'a>(
+    t: &Tables<'a>,
+    node: Node<'a>,
+    mut reads: Vec<Node<'a>>,
+    outer_cases: bool,
+) -> Result<Vec<Node<'a>>> {
     reads.sort_by_key(|n| n.start_byte());
     let rows = t.walk(node, true);
     let mut controls = Vec::new();
@@ -218,8 +225,7 @@ fn ordered_reads_impl<'a>(
             n.kind() == "assignment_expression"
                 && n.child_by_field_name("left")
                     .is_some_and(|l| t.text(l) == variable)
-                || outer_cases
-                    && n.kind() == "variable_declarator"
+                || n.kind() == "variable_declarator"
                     && n.child_by_field_name("name")
                         .is_some_and(|l| t.text(l) == variable)
         }) {
