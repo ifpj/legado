@@ -190,6 +190,8 @@ pub(crate) fn parse_integer(value: &Scalar, radix: u32) -> Scalar {
     }
     Number(if digits == 0 { f64::NAN } else { result * sign })
 }
+// 3.14 is a literal from the declared recipe, not an approximation of pi.
+#[allow(clippy::approx_constant)]
 pub(crate) fn scalar_checks() -> Result<Vec<Value>> {
     let nan = Number(f64::NAN);
     let inf = Number(f64::INFINITY);

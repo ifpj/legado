@@ -24,8 +24,8 @@ impl IntoResponse for Error {
 }
 /// A JSON request body. Framework rejections (syntax, media type, size) use
 /// the same `{"ok":false,"code":…}` envelope as every other error.
-struct Body(Value);
-impl<S: Send + Sync> FromRequest<S> for Body {
+struct JsonBody(Value);
+impl<S: Send + Sync> FromRequest<S> for JsonBody {
     type Rejection = Error;
     async fn from_request(request: Request, state: &S) -> Result<Self> {
         match Json::<Value>::from_request(request, state).await {
@@ -35,15 +35,17 @@ impl<S: Send + Sync> FromRequest<S> for Body {
     }
 }
 fn rejected(rejection: JsonRejection) -> Error {
-    let (code, message) = match &rejection {
-        JsonRejection::MissingJsonContentType(_) => {
+    let status = rejection.status().as_u16();
+    let (code, message) = match (&rejection, status) {
+        (JsonRejection::MissingJsonContentType(_), _) => {
             ("INVALID_REQUEST", "请求需要 Content-Type: application/json")
         }
-        JsonRejection::BytesRejection(_) => ("REQUEST_TOO_LARGE", "请求体超过 1 MiB"),
+        (JsonRejection::BytesRejection(_), 413) => ("REQUEST_TOO_LARGE", "请求体超过 1 MiB"),
+        (JsonRejection::BytesRejection(_), _) => ("INVALID_REQUEST", "请求体读取失败"),
         _ => ("INVALID_REQUEST", "请求体不是有效的 JSON"),
     };
     let mut error = Error::new(code, message);
-    error.status = rejection.status().as_u16();
+    error.status = status;
     error.details = json!({"reason":rejection.body_text()});
     error
 }
@@ -153,7 +155,7 @@ async fn status(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value
 async fn fetch_json(
     State(app): State<App>,
     headers: HeaderMap,
-    Body(options): Body,
+    JsonBody(options): JsonBody,
 ) -> Result<Response> {
     authorized(&app, &headers)?;
     Ok(send_bytes(
@@ -165,7 +167,7 @@ async fn fetch_json(
 async fn solve(
     State(app): State<App>,
     headers: HeaderMap,
-    Body(options): Body,
+    JsonBody(options): JsonBody,
 ) -> Result<Response> {
     authorized(&app, &headers)?;
     Ok(send_bytes(
@@ -177,7 +179,7 @@ async fn solve(
 async fn analyze(
     State(app): State<App>,
     headers: HeaderMap,
-    Body(options): Body,
+    JsonBody(options): JsonBody,
 ) -> Result<Response> {
     authorized(&app, &headers)?;
     Ok(send_bytes(

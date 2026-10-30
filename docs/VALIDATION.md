@@ -271,7 +271,7 @@ Windows release 构建 `9e17732b231b` 已更新至唯一的 `127.0.0.1:19705` �
 | DNS 单飞、到期、失败恢复、CDN 地址映射、有限回退 | network 原生异步测试，注入本地 DoH 与上游 |
 | 会话隔离、读写锁、32 个会话、取消和统计 | service 与 HTTP 原生测试，包括验证取消后不能遗留已验证状态 |
 | Cookie 范围及导出不改变会话 | 原生 Cookie 测试，覆盖 host-only、domain、path、secure、expiry |
-| 回调、手动时钟、自检、直接完成与未知后续 | native_regression，使用显式时钟和注入依赖 |
+| 回调、手动时钟、自检、直接完成与未知后续 | `src/regression/native.rs`（原 native_regression），使用显式时钟和注入依赖 |
 | 原 Python ABI、标量回退、解析器缓存内部接口 | 旧架构接口不进入 Rust 服务；以新实现独立向量、真实计算和节点遍历边界测试替代 |
 | 旧人工校准路径 | 不进入严格原生验收，也不进入交付运行路径 |
 | Android 日志/站点稳定性/报告生成等开发工具 | 旧工具保留本地，不将这些 Python 工具伪装成 Rust 运行功能 |
