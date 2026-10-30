@@ -6,14 +6,18 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
+pub mod layout_store;
 mod sealed;
 
 #[derive(Default)]
 struct LayoutCache {
     layouts: Mutex<Vec<(bool, Value)>>,
     compiling: Mutex<()>,
+    /// Newly compiled layouts are also written here; loaded entries follow
+    /// the same matching and ambiguity rules as the embedded ones.
+    store: Option<Arc<layout_store::LayoutStore>>,
 }
 impl LayoutCache {
     fn lookup(
@@ -57,10 +61,13 @@ impl LayoutCache {
             .iter()
             .any(|(tasks, existing)| *tasks == frame && *existing == layout)
         {
-            if layouts.len() >= 32 {
+            if layouts.len() >= layout_store::MAX_ENTRIES {
                 layouts.remove(0);
             }
             layouts.push((frame, layout.clone()));
+            if let Some(store) = &self.store {
+                store.save(frame, &layout);
+            }
         }
         Ok((layout, false))
     }
@@ -103,6 +110,46 @@ mod layout_cache_tests {
         assert_eq!(cache.layouts.lock().unwrap().len(), 1);
         assert_eq!(results.iter().filter(|(_, reused)| !reused).count(), 1);
         assert!(results.iter().all(|(v, _)| *v == results[0].0));
+    }
+
+    #[test]
+    fn compiled_layouts_are_persisted_and_reloaded_without_recompiling() {
+        let dir = std::env::temp_dir().join(format!("cf-layout-cache-{}", uuid::Uuid::new_v4()));
+        let store = Arc::new(layout_store::LayoutStore::open(&dir, "build-a").unwrap());
+        let cache = LayoutCache {
+            layouts: Mutex::new(Vec::new()),
+            compiling: Mutex::new(()),
+            store: Some(store.clone()),
+        };
+        let layout = json!({"build":"current","format":{"byte_offset":1},"key_material":{"program_sha256":"p","helper":"h"}});
+        let matches = |v: &Value| Ok(v["build"] == "current");
+        let (first, reused) = cache.resolve(true, matches, || Ok(layout.clone())).unwrap();
+        assert!(!reused && first == layout);
+        assert!(cache
+            .resolve(false, matches, || Err(Error::new("TIMEOUT", "cancelled")))
+            .is_err());
+        assert_eq!(store.status()["saved"], 1);
+        let reloaded = LayoutCache {
+            layouts: Mutex::new(
+                layout_store::LayoutStore::open(&dir, "build-a")
+                    .unwrap()
+                    .load(),
+            ),
+            compiling: Mutex::new(()),
+            store: None,
+        };
+        let (second, reused) = reloaded
+            .resolve(true, matches, || Err(Error::new("X", "must not compile")))
+            .unwrap();
+        assert!(reused && second == layout);
+        // The persisted frame flag is part of the match, like the embedded one.
+        assert!(reloaded
+            .resolve(false, matches, || Err(Error::new("X", "parent misses")))
+            .is_err());
+        assert!(LayoutCache::default()
+            .resolve(true, matches, || Err(Error::new("X", "no store")))
+            .is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -387,6 +434,48 @@ fn bind_current_sealed(meta: &mut Value, current: Value) -> Result<()> {
     meta["sealed_literals"] = current;
     Ok(())
 }
+/// Embedded layouts plus any persisted by this binary, initialised once.
+/// Persisted entries are newer than the embedded ones; when the bound is
+/// exceeded the oldest embedded layouts give way.
+fn layouts() -> &'static LayoutCache {
+    static LAYOUTS: OnceLock<LayoutCache> = OnceLock::new();
+    LAYOUTS.get_or_init(|| {
+        let data: Value =
+            serde_json::from_str(include_str!("../profiles/protocol-layouts-v1.json"))
+                .expect("compiled layouts");
+        let mut layouts: Vec<(bool, Value)> = data["layouts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| {
+                (
+                    v["frameTasks"] == true,
+                    normalize(&v["plan"]).expect("compiled layout schema"),
+                )
+            })
+            .collect();
+        let store = layout_store::store();
+        if let Some(store) = &store {
+            for entry in store.load() {
+                if !layouts.contains(&entry) {
+                    layouts.push(entry);
+                }
+            }
+            while layouts.len() > layout_store::MAX_ENTRIES {
+                layouts.remove(0);
+            }
+        }
+        LayoutCache {
+            layouts: Mutex::new(layouts),
+            compiling: Mutex::new(()),
+            store,
+        }
+    })
+}
+/// Load persisted layouts now so startup status reports them.
+pub fn warm_layouts() -> usize {
+    layouts().layouts.lock().map(|l| l.len()).unwrap_or(0)
+}
 impl Plan {
     pub fn analyze(source: &str, frame: bool) -> Result<Self> {
         Self::analyze_inner(source, frame, false, None).map(|(plan, _)| plan)
@@ -405,28 +494,7 @@ impl Plan {
     ) -> Result<(Self, Option<PendingSealed>)> {
         let prepared = crate::literal_strings::prepare_for_compile_reusing(source, original)?;
         let source = prepared.source.as_ref();
-        static LAYOUTS: OnceLock<LayoutCache> = OnceLock::new();
-        let layouts = LAYOUTS.get_or_init(|| {
-            let data: Value =
-                serde_json::from_str(include_str!("../profiles/protocol-layouts-v1.json"))
-                    .expect("compiled layouts");
-            LayoutCache {
-                layouts: Mutex::new(
-                    data["layouts"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|v| {
-                            (
-                                v["frameTasks"] == true,
-                                normalize(&v["plan"]).expect("compiled layout schema"),
-                            )
-                        })
-                        .collect(),
-                ),
-                compiling: Mutex::new(()),
-            }
-        });
+        let layouts = layouts();
         let programs = re(r#"['"`]([A-Za-z0-9+/]{1000,20000}={0,2})['"`]"#);
         let hashes: HashSet<_> = programs
             .captures_iter(source)
@@ -786,7 +854,7 @@ pub(crate) fn literals_bounded(
 ) -> Result<Vec<Literal>> {
     literals_excluding(raw, p, plan, overlaps, max_units, binary, max_work, &[])
 }
-fn literals_excluding(
+pub(crate) fn literals_excluding(
     raw: &[u8],
     p: &Program,
     plan: &Plan,
@@ -1050,7 +1118,7 @@ fn recover_literals(
 ) -> Result<()> {
     recover_literals_excluding(raw, program, plan, all, &[])
 }
-fn recover_literals_excluding(
+pub(crate) fn recover_literals_excluding(
     raw: &[u8],
     program: &Program,
     plan: &Plan,
@@ -1456,7 +1524,7 @@ pub(crate) fn conflicting_literals(
     let checked = checked_instruction_spans(raw, plan)?;
     conflicting_literals_with_spans(raw, literals, plan, &checked)
 }
-fn checked_instruction_spans(raw: &[u8], plan: &Plan) -> Result<Vec<(usize, usize)>> {
+pub(crate) fn checked_instruction_spans(raw: &[u8], plan: &Plan) -> Result<Vec<(usize, usize)>> {
     let Some(entry) = plan.meta["input_data_profile"].get("flow-call") else {
         return Ok(Vec::new());
     };
@@ -1477,7 +1545,7 @@ fn checked_instruction_spans(raw: &[u8], plan: &Plan) -> Result<Vec<(usize, usiz
     }
     Ok(merged)
 }
-fn conflicting_literals_with_spans(
+pub(crate) fn conflicting_literals_with_spans(
     raw: &[u8],
     literals: &[Literal],
     plan: &Plan,

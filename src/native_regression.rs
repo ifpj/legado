@@ -204,3 +204,185 @@ fn profile_current_compiler() {
     stage("declarations");
     eprintln!("{}", serde_json::to_string(&rows).unwrap());
 }
+
+/// Manual local profiling of the layout-reuse path a warm process takes for
+/// every new parent initializer; no network or acceptance flag.
+#[test]
+#[ignore = "set CF_GATEWAY_PROFILE_SCRIPT to a local captured public initializer"]
+fn profile_layout_reuse() {
+    use base64::Engine;
+    use sha2::Digest;
+    let source = std::fs::read_to_string(
+        std::env::var("CF_GATEWAY_PROFILE_SCRIPT").expect("initializer path"),
+    )
+    .unwrap();
+    let rounds: usize = std::env::var("CF_GATEWAY_PROFILE_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
+    for round in 0..rounds {
+        let mut last = std::time::Instant::now();
+        let mut rows = Vec::new();
+        let mut stage = |name: &str| {
+            rows.push((name.to_string(), last.elapsed().as_secs_f64() * 1000.));
+            last = std::time::Instant::now();
+        };
+        let document: crate::html::Document = source.as_str().into();
+        let tree = document.syntax().unwrap().clone();
+        stage("syntax");
+        let prepared =
+            crate::literal_strings::prepare_for_compile_reusing(&document, Some(&tree)).unwrap();
+        stage("prepare");
+        let programs = re(r#"['"`]([A-Za-z0-9+/]{1000,20000}={0,2})['"`]"#);
+        let hashes: Vec<_> = programs
+            .captures_iter(prepared.source.as_ref())
+            .filter_map(|c| base64::engine::general_purpose::STANDARD.decode(&c[1]).ok())
+            .map(|v| hex::encode(sha2::Sha256::digest(v)))
+            .collect();
+        stage("program_hashes");
+        let (plan, pending) = data::Plan::prepare_parent(&document, Some(&tree)).unwrap();
+        stage("prepare_parent_total");
+        let reused = plan.meta["compiledLayoutReused"] == true;
+        if let Some(pending) = pending {
+            pending.validate().unwrap();
+            stage("sealed_validation");
+        }
+        let _ = data::Plan::from_layout(prepared.source.as_ref(), plan.meta.clone()).unwrap();
+        stage("from_layout");
+        eprintln!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({"round":round,"reused":reused,"programs":hashes.len(),"build":plan.meta["build"],"stagesMs":rows}))
+                .unwrap()
+        );
+    }
+}
+
+/// Manual breakdown of the syntax-index work shared by literal decoding and
+/// sealed-key validation on a captured initializer.
+#[test]
+#[ignore = "set CF_GATEWAY_PROFILE_SCRIPT to a local captured public initializer"]
+fn profile_syntax_indexes() {
+    let source = std::fs::read_to_string(
+        std::env::var("CF_GATEWAY_PROFILE_SCRIPT").expect("initializer path"),
+    )
+    .unwrap();
+    let document: crate::html::Document = source.as_str().into();
+    let tree = document.syntax().unwrap().clone();
+    for round in 0..3 {
+        let mut last = std::time::Instant::now();
+        let mut rows = Vec::new();
+        let mut stage = |name: &str| {
+            rows.push((name.to_string(), last.elapsed().as_secs_f64() * 1000.));
+            last = std::time::Instant::now();
+        };
+        let mut plain = tree_sitter::Parser::new();
+        plain
+            .set_language(&tree_sitter_javascript::LANGUAGE.into())
+            .unwrap();
+        let _ = crate::cpu::parse(&mut plain, &source).unwrap();
+        stage("parse");
+        let nodes = constants::walk(tree.root_node(), true);
+        stage("walk");
+        let scopes = constants::scope_index(&nodes, false);
+        stage("scope_index");
+        let positions: std::collections::HashMap<usize, usize> = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.id(), index))
+            .collect();
+        stage("positions");
+        let declarators = nodes
+            .iter()
+            .filter(|n| n.kind() == "variable_declarator")
+            .count();
+        let calls = nodes
+            .iter()
+            .filter(|n| n.kind() == "call_expression")
+            .count();
+        stage("kind_counts");
+        let prepared =
+            crate::literal_strings::prepare_for_compile_reusing(&document, Some(&tree)).unwrap();
+        stage("prepare_total");
+        let reparsed = crate::cpu::parse_reusing(
+            &mut tree_sitter::Parser::new(),
+            prepared.source.as_ref(),
+            prepared.tree.as_ref(),
+        );
+        stage("reparse_attempt");
+        let syntax = constants::Tables::syntax(tree.root_node(), &source).unwrap();
+        stage("tables_syntax");
+        let early = compiler::current_sealed_original(&source, &tree);
+        stage("current_sealed_original");
+        eprintln!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({"round":round,"nodes":nodes.len(),"scoped":scopes.len(),"positions":positions.len(),"declarators":declarators,"calls":calls,"tables_nodes":syntax.all().len(),"early_ok":early.is_ok(),"reparsed":reparsed.is_ok(),"stagesMs":rows}))
+                .unwrap()
+        );
+    }
+}
+
+/// Manual breakdown of the first component response read on captured data
+/// (frame.js plus the decoded frame-first program); no network.
+#[test]
+#[ignore = "set CF_GATEWAY_PROFILE_FRAME_JS and CF_GATEWAY_PROFILE_FRAME_PROGRAM to local captures"]
+fn profile_frame_response_read() {
+    use base64::Engine;
+    let frame_js =
+        std::fs::read_to_string(std::env::var("CF_GATEWAY_PROFILE_FRAME_JS").unwrap()).unwrap();
+    let program_text =
+        std::fs::read_to_string(std::env::var("CF_GATEWAY_PROFILE_FRAME_PROGRAM").unwrap())
+            .unwrap();
+    let plan = data::Plan::analyze(&frame_js, true).unwrap();
+    for round in 0..3 {
+        let mut last = std::time::Instant::now();
+        let mut rows = Vec::new();
+        let mut stage = |name: &str| {
+            rows.push((name.to_string(), last.elapsed().as_secs_f64() * 1000.));
+            last = std::time::Instant::now();
+        };
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(program_text.trim())
+            .unwrap();
+        stage("base64");
+        let program = data::program(&raw, &plan.format, false).unwrap();
+        stage("program");
+        let checked = data::checked_instruction_spans(&raw[..program.code_length], &plan).unwrap();
+        stage("checked_spans");
+        let mut all = data::literals_excluding(
+            &raw,
+            &program,
+            &plan,
+            false,
+            65535,
+            false,
+            8 * 1024 * 1024,
+            &checked,
+        )
+        .unwrap();
+        stage("literals");
+        data::recover_literals_excluding(&raw, &program, &plan, &mut all, &checked).unwrap();
+        all.sort_by_key(|l| l.start);
+        stage("recover");
+        let conflicts = data::conflicting_literals_with_spans(
+            &raw[..program.code_length],
+            &all,
+            &plan,
+            &checked,
+        )
+        .unwrap();
+        all.retain(|l| !conflicts.contains(&l.start));
+        stage("conflicts");
+        let packed = data::packed_texts(&all).unwrap();
+        stage("packed");
+        let response = data::Response::read(program_text.trim(), &plan, false).unwrap();
+        stage("read_total");
+        let mut response = response;
+        let catalog = catalog::Catalog::read(&mut response, &plan);
+        stage("catalog");
+        eprintln!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({"round":round,"raw":raw.len(),"code":program.code_length,"literals":all.len(),"packed":packed.len(),"checked":checked.len(),"catalogOk":catalog.is_ok(),"stagesMs":rows}))
+                .unwrap()
+        );
+    }
+}

@@ -7,7 +7,7 @@ The git worktree that contains this script is the only source checkout.
 Machine-specific files stay out of git:
   target/      cargo build cache (one shared cache, incremental)
   .local/tools CMake, NASM and libclang used by the native dependencies
-  .local/bin   the running service binary, pid file and logs
+  .local/bin   the running service binary, pid file, logs and layout-cache/
   .cargo/      generated local cargo config (written by `setup`)
 
 Commands:
@@ -15,6 +15,7 @@ Commands:
   build   cargo build --release (incremental, codegen-units=16)
   test    cargo fmt --check, cargo test --locked, Node syntax and contract checks
   run     build, replace the single service on the port in place, wait for /v1/status
+          (-LayoutCacheDir <dir|none> overrides the compiled-layout cache location)
   stop    stop the service listening on the port
   status  print /v1/status
   push    test, then git push origin cf (requires a clean tree on branch cf)
@@ -29,7 +30,9 @@ param(
     [ValidateSet('setup', 'build', 'test', 'run', 'stop', 'status', 'push')]
     [string]$Command = 'test',
     [int]$Port = 19705,
-    [string]$Listen = '127.0.0.1'
+    [string]$Listen = '127.0.0.1',
+    # Compiled-layout cache directory passed to serve; "none" disables it.
+    [string]$LayoutCacheDir = ''
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -131,7 +134,8 @@ function Start-Gateway([string]$Binary) {
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
     Stop-Gateway
     Copy-Item -LiteralPath $Binary -Destination $serviceExe -Force
-    $process = Start-Process -FilePath $serviceExe -ArgumentList @('serve', '--host', $Listen, '--port', $Port) `
+    if (-not $LayoutCacheDir) { $LayoutCacheDir = Join-Path $binDir 'layout-cache' }
+    $process = Start-Process -FilePath $serviceExe -ArgumentList @('serve', '--host', $Listen, '--port', $Port, '--layout-cache-dir', $LayoutCacheDir) `
         -WorkingDirectory $binDir -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $binDir 'cf-gateway.out.log') `
         -RedirectStandardError (Join-Path $binDir 'cf-gateway.err.log')

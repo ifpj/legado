@@ -19,6 +19,8 @@ docker run -d --name cf-gateway --restart unless-stopped \
 
 打开 http://服务器地址:19686，在右上角填写令牌。留空 CF_GATEWAY_TOKEN 表示不启用访问令牌。也可以使用仓库的 compose.yaml。
 
+首次遇到新的 Cloudflare 初始化程序时需要编译其布局（本机约 1～2.5 秒，低配设备更久）。编译结果会写入 `--layout-cache-dir`（环境变量 `CF_GATEWAY_LAYOUT_CACHE_DIR`，默认系统临时目录下的 `cf-gateway-layout-cache`，填 `none` 关闭），重启后首个请求直接复用，不再重新编译。缓存只含布局结构，按当前程序摘要、版本和辅助函数名校验，并绑定编译它的程序构建；目录不可写时自动关闭，`/v1/status` 的 `runtime.layoutCache` 显示状态。compose.yaml 把 `/tmp` 挂为卷，使缓存在 `read_only` 容器中也能保留。
+
 Web 会自动适配暗色模式。接入示例页使用当前访问地址的域名、端口和 HTTPS，支持手动修改。反向代理应将同一路径前缀下的静态资源和 API 一并转发；公开地址以 Web 中填写的地址为准。
 
 左上角固定显示版本号和构建标识。构建标识取当前运行文件 SHA-256 的前 12 位，可区分包含未提交修改的本地构建；无需 Git 或额外运行工具。`/v1/status` 同样返回 `version` 与 `buildId`。修改源码后需重新构建并启动新程序，页面显示的是实际运行版本。

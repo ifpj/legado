@@ -42,6 +42,12 @@ enum Command {
         token: String,
         #[arg(long)]
         capture_dir: Option<PathBuf>,
+        #[arg(
+            long,
+            env = "CF_GATEWAY_LAYOUT_CACHE_DIR",
+            help = "Directory for compiled initializer layouts; \"none\" disables [default: <temp>/cf-gateway-layout-cache]"
+        )]
+        layout_cache_dir: Option<String>,
     },
     Probe {
         #[arg(long)]
@@ -52,6 +58,8 @@ enum Command {
         output: PathBuf,
         #[arg(long)]
         capture_dir: Option<PathBuf>,
+        #[arg(long, env = "CF_GATEWAY_LAYOUT_CACHE_DIR")]
+        layout_cache_dir: Option<String>,
     },
     Compile {
         #[arg(long)]
@@ -76,6 +84,16 @@ enum Command {
         parent_html: Option<PathBuf>,
     },
 }
+/// Unset uses a private directory under the OS temporary path; "none" or an
+/// empty value disables persistence. An unusable directory only disables it.
+fn configure_layout_cache(option: Option<String>) -> serde_json::Value {
+    let dir = match option.as_deref().map(str::trim) {
+        None => Some(std::env::temp_dir().join("cf-gateway-layout-cache")),
+        Some("") | Some("none") | Some("off") => None,
+        Some(path) => Some(PathBuf::from(path)),
+    };
+    cf_gateway::data::layout_store::configure(dir)
+}
 async fn execute() -> Result<()> {
     let args = Args::parse();
     let network = args
@@ -86,6 +104,7 @@ async fn execute() -> Result<()> {
         port: 19686,
         token: std::env::var("CF_GATEWAY_TOKEN").unwrap_or_default(),
         capture_dir: None,
+        layout_cache_dir: std::env::var("CF_GATEWAY_LAYOUT_CACHE_DIR").ok(),
     }) {
         Command::Css { input, output } => {
             let html = std::fs::read_to_string(input)?;
@@ -103,7 +122,12 @@ async fn execute() -> Result<()> {
             port,
             token,
             capture_dir,
+            layout_cache_dir,
         } => {
+            println!(
+                "{}",
+                serde_json::json!({"layoutCache":configure_layout_cache(layout_cache_dir)})
+            );
             cf_gateway::web::serve(
                 cf_gateway::service::Service::with_network(
                     cf_gateway::engine::Engine { capture_dir },
@@ -120,7 +144,9 @@ async fn execute() -> Result<()> {
             timeout_ms,
             output,
             capture_dir,
+            layout_cache_dir,
         } => {
+            configure_layout_cache(layout_cache_dir);
             let engine = cf_gateway::engine::Engine { capture_dir };
             let session = std::sync::Arc::new(cf_gateway::network::Session::new(
                 cf_gateway::network::Dns::new(&network)?,

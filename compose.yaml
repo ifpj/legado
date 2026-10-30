@@ -6,7 +6,13 @@ services:
     environment:
       CF_GATEWAY_TOKEN: ${CF_GATEWAY_TOKEN:-}
       CF_GATEWAY_TIMEZONE: Asia/Shanghai
+    volumes:
+      # Keeps /tmp/cf-gateway-layout-cache (compiled initializer layouts)
+      # across restarts while the root filesystem stays read-only.
+      - cf-gateway-tmp:/tmp
     restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+volumes:
+  cf-gateway-tmp:
