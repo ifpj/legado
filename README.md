@@ -130,7 +130,7 @@ network 可选，兼容旧顶层 proxy / connectTo。timeoutMs 范围 1000～120
 
 69书吧的 `/modules/article/search.php?searchkey=…&searchtype=all` 是逻辑搜索地址，服务按该站实际表单使用 POST 提交，保留 GBK 编码。嵌入式验证通过后，提交当前令牌到同站 `/verify.php`，保存站点返回的 Cookie，再重新提交搜索。该适配器仅覆盖69书吧已识别的流程，不执行页面回调，也不开放任意表单提交。网站当前要求两次搜索间隔不少于 5 秒；书源显示上游提示，不将其当成空结果或无限重试。翻页只跟随实际下一页链接。
 
-/v1/fetch 的 ok=true 表示拿到网站实际响应，status 可能是网站的 404。协议或传输失败返回 ok=false、code、error、details。Web 将处理失败与网站 HTTP 错误分开显示。
+/v1/fetch 的 ok=true 表示拿到网站实际响应，status 可能是网站的 404。协议或传输失败返回 ok=false、code、error、details；未知路径、方法不符、请求体不是 JSON、缺少 `Content-Type: application/json` 或超过 1 MiB 也返回同样结构（`NOT_FOUND`、`METHOD_NOT_ALLOWED`、`INVALID_REQUEST`、`REQUEST_TOO_LARGE`），调用方只需解析一种错误格式。Web 将处理失败与网站 HTTP 错误分开显示。
 
 书源采用代取模式。跨出口复用 Cookie 不保证可用。阅读的网络导入不能设置请求头，因此只读的 /source.js、/sources.json 与 /image 额外接受 token 查询参数；Web 会在启用令牌时生成相应导入链接。链接包含服务令牌，请按凭证保管。其他 API 仍只接受 Authorization 请求头。令牌不会转发给目标网站。封面统一通过 /image 代取，避免手机直连时遇到 403；该接口保持原始二进制，仅接受可识别签名的 PNG/JPEG/GIF/WebP/AVIF，不转发 SVG 或 HTML。
 

@@ -18,6 +18,7 @@ const server=http.createServer((req,res)=>{
   }
   const index=await fetch(base+'/');assert.equal(index.status,200);const html=await index.text();assert.match(html,/接入示例/);
   const logo=await fetch(base+'/logo.png');assert.equal(logo.headers.get('content-type'),'image/png');await logo.arrayBuffer();
+  const unknown=await fetch(base+'/nope');assert.equal(unknown.status,404);assert.equal((await unknown.json()).code,'NOT_FOUND');
   const status=await (await fetch(base+'/v1/status',{headers})).json();
   assert.equal(status.build,status.buildId);assert.ok(status.build.startsWith(status.version));assert.equal(status.dirty,false);assert.match(status.binaryHash,/^[a-f0-9]{12}$/);assert.ok(html.includes('>'+status.build+'<'));
   assert.equal(status.runtime.language,'Rust');assert.equal(status.runtime.python,null);assert.ok(status.runtime.rssBytes>0);

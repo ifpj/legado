@@ -1,7 +1,7 @@
 use crate::{re, require, syntax::static_data::validate_url, Error, Result};
 use futures_util::StreamExt;
 use serde_json::{Map, Value};
-use std::{collections::HashSet, future::Future, sync::Arc, time::Instant};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Instant};
 use tokio::{io::AsyncReadExt, sync::RwLock};
 use wreq::{
     cookie::Jar,
@@ -134,9 +134,13 @@ impl Session {
         let mut method = method.to_string();
         let mut body = body;
         let mut supplied = request_headers(&method, headers)?;
-        let mut visited = HashSet::new();
+        // A site may set a cookie and redirect back to the same address once;
+        // browsers follow that. A third visit of one address is a loop.
+        let mut visits: HashMap<String, u8> = HashMap::new();
         for redirects in 0..=10 {
-            if !visited.insert(url.to_string()) {
+            let count = visits.entry(url.to_string()).or_default();
+            *count += 1;
+            if *count > 2 {
                 return Err(Error::new("UPSTREAM_ERROR", "网站重定向循环"));
             }
             let supplied_headers = supplied

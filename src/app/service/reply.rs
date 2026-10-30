@@ -61,7 +61,10 @@ pub(super) async fn prepare(
         if format == Format::Json {
             // Serialize the large body once, on a CPU worker. Append the small
             // timings field afterwards so this work is included in totalMs.
-            serde_json::to_writer(&mut ResponseBuffer(&mut bytes), &value)?;
+            // A write refused by the cancellation check is the deadline error,
+            // not a data error.
+            serde_json::to_writer(&mut ResponseBuffer(&mut bytes), &value)
+                .map_err(|e| crate::cpu::check().err().unwrap_or_else(|| e.into()))?;
             let closing_brace = bytes.pop();
             debug_assert_eq!(closing_brace, Some(b'}'));
             value.as_object_mut().unwrap().remove("body");

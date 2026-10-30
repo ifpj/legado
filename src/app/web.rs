@@ -1,7 +1,7 @@
 use crate::{app::service::Service, Error, Result};
 use axum::{
-    extract::{DefaultBodyLimit, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    extract::{rejection::JsonRejection, DefaultBodyLimit, FromRequest, Query, Request, State},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -21,6 +21,43 @@ impl IntoResponse for Error {
         )
             .into_response()
     }
+}
+/// A JSON request body. Framework rejections (syntax, media type, size) use
+/// the same `{"ok":false,"code":…}` envelope as every other error.
+struct Body(Value);
+impl<S: Send + Sync> FromRequest<S> for Body {
+    type Rejection = Error;
+    async fn from_request(request: Request, state: &S) -> Result<Self> {
+        match Json::<Value>::from_request(request, state).await {
+            Ok(Json(value)) => Ok(Self(value)),
+            Err(rejection) => Err(rejected(rejection)),
+        }
+    }
+}
+fn rejected(rejection: JsonRejection) -> Error {
+    let (code, message) = match &rejection {
+        JsonRejection::MissingJsonContentType(_) => {
+            ("INVALID_REQUEST", "请求需要 Content-Type: application/json")
+        }
+        JsonRejection::BytesRejection(_) => ("REQUEST_TOO_LARGE", "请求体超过 1 MiB"),
+        _ => ("INVALID_REQUEST", "请求体不是有效的 JSON"),
+    };
+    let mut error = Error::new(code, message);
+    error.status = rejection.status().as_u16();
+    error.details = json!({"reason":rejection.body_text()});
+    error
+}
+async fn not_found(uri: Uri) -> Error {
+    let mut error = Error::new("NOT_FOUND", "没有这个接口");
+    error.status = 404;
+    error.details = json!({"path":uri.path()});
+    error
+}
+async fn method_not_allowed(method: Method, uri: Uri) -> Error {
+    let mut error = Error::new("METHOD_NOT_ALLOWED", "此接口不支持该请求方法");
+    error.status = 405;
+    error.details = json!({"method":method.as_str(),"path":uri.path()});
+    error
 }
 fn authorized(app: &App, headers: &HeaderMap) -> Result<()> {
     if app.token.is_empty() {
@@ -116,7 +153,7 @@ async fn status(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value
 async fn fetch_json(
     State(app): State<App>,
     headers: HeaderMap,
-    Json(options): Json<Value>,
+    Body(options): Body,
 ) -> Result<Response> {
     authorized(&app, &headers)?;
     Ok(send_bytes(
@@ -128,7 +165,7 @@ async fn fetch_json(
 async fn solve(
     State(app): State<App>,
     headers: HeaderMap,
-    Json(options): Json<Value>,
+    Body(options): Body,
 ) -> Result<Response> {
     authorized(&app, &headers)?;
     Ok(send_bytes(
@@ -140,7 +177,7 @@ async fn solve(
 async fn analyze(
     State(app): State<App>,
     headers: HeaderMap,
-    Json(options): Json<Value>,
+    Body(options): Body,
 ) -> Result<Response> {
     authorized(&app, &headers)?;
     Ok(send_bytes(
@@ -175,7 +212,10 @@ async fn fetch_html(
         ("totalMs", "x-cf-gateway-ms"),
         ("queueMs", "x-cf-gateway-queue-ms"),
     ] {
-        if let Ok(v) = value["timings"][key].to_string().parse() {
+        if let Some(v) = value["timings"][key]
+            .as_f64()
+            .and_then(|v| HeaderValue::from_str(&v.to_string()).ok())
+        {
             response.headers_mut().insert(name, v);
         }
     }
@@ -205,7 +245,10 @@ async fn fetch_image(
     let h = response.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
-        value["imageType"].as_str().unwrap().parse().unwrap(),
+        value["imageType"]
+            .as_str()
+            .and_then(|kind| HeaderValue::from_str(kind).ok())
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
     );
     h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     h.insert("x-content-type-options", "nosniff".parse().unwrap());
@@ -301,8 +344,36 @@ pub fn router(service: Service, token: String) -> Router {
         .route("/v1/fetch", post(fetch_json))
         .route("/v1/solve", post(solve))
         .route("/v1/analyze", post(analyze))
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .with_state(state)
+}
+/// Ctrl+C, or SIGTERM from `docker stop`, stops accepting and lets
+/// in-flight requests finish within their own deadlines.
+async fn shutdown_signal() {
+    let interrupt = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = interrupt => {}
+        _ = terminate => {}
+    }
+    println!(
+        "{}",
+        json!({"service":"cf-gateway-rust","event":"shutdown","reason":"signal"})
+    );
 }
 pub async fn serve(service: Service, host: &str, port: u16, token: String) -> Result<()> {
     let routes = router(service, token);
@@ -311,5 +382,8 @@ pub async fn serve(service: Service, host: &str, port: u16, token: String) -> Re
         "{}",
         json!({"service":"cf-gateway-rust","listen":format!("http://{host}:{port}"),"runtime":"Rust"})
     );
-    axum::serve(listener, routes).await.map_err(Error::from)
+    axum::serve(listener, routes)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .map_err(Error::from)
 }

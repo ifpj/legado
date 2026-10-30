@@ -1,5 +1,18 @@
 # 迁移与验收记录
 
+## 代码审查：接口错误格式、重定向语义与停机（2026-10-30）
+
+逐层通读 HTTP 入口、会话与超时循环、CPU 名额与取消、网络层（重定向、传输桥、DNS、配置）、持久化布局缓存、原生内核与协议引擎后，确认的问题与修正：
+
+1. 框架层拒绝不走统一错误格式。未知路径返回空 404、方法不符返回空 405、请求体不是 JSON／缺少 `Content-Type` 或超过 1 MiB 返回 Axum 的纯文本 400／415／413；书源脚本和 Web 控制台只会把它们当成"目标网站 HTTP n"或"响应无法解析"。现在 `/v1/*` 的请求体经自有提取器读取，所有这类拒绝与 404、405 兜底都返回 `{"ok":false,"code":…,"error":…,"details":…}`（`NOT_FOUND`、`METHOD_NOT_ALLOWED`、`INVALID_REQUEST`、`REQUEST_TOO_LARGE`），状态码不变。
+2. 网络层把"同一地址出现第二次"当作重定向循环。网站设置 Cookie 后跳回原地址是浏览器会跟随的常见写法，原实现在第二次访问前就报"网站重定向循环"。现在同一地址允许再访问一次，第三次才视为循环；10 次重定向上限与跨源、协议降级时的头部处理不变。
+3. 准备响应时若取消检查在 JSON 序列化中触发，错误被 `serde_json` 的 IO 错误包装成 `INVALID_DATA`；现在优先返回 CPU 取消／总时限错误（`TIMEOUT`，`source: cpu`）。
+4. 服务收到 Ctrl+C 或 SIGTERM 时直接被终止；现在停止接受新连接并让进行中的请求在各自总时限内完成，`docker stop` 可以干净地结束容器。
+5. 去掉可被外部数据触发的 panic：`/image` 的 Content-Type、`/fetch` 的计时响应头改为有回退值的构造；引擎里任务结果缺失、任务信封缺失由 `unwrap` 改为 `UNSUPPORTED_FORMAT`，`merge`／`remove` 在非对象上不再 panic。
+
+通读但未改动：`cpu.rs` 的名额与缓存锁让出、`transport.rs` 回环 SOCKS 桥与预连、`layout_store.rs` 的原子写入与 Unix 0700 检查、`kernel.rs` 五个 `extern "C"` 内核的指针与边界、`resolver.rs` 的 DoH 单飞与 TTL，都与注释一致，没有发现越界、泄漏或死锁路径；`clippy` 的 515 条 `result_large_err` 与若干风格提示未处理。
+
+验证：新增 `one_redirect_back_to_the_same_address_is_followed_but_a_loop_still_fails`（跳回同址一次后取得页面、无限循环仍失败且只多发一次请求）与 `framework_rejections_use_the_json_error_envelope`（404、405、400、415、413 与非对象 JSON 六种情形）；容器冒烟增加未知路径的 404 格式检查。`scripts/dev.ps1 test` 为 209 项通过、5 项手动剖析忽略，Node 语法与三份契约通过。
 ## 源码按处理阶段分组（2026-10-30）
 
 此前 `src/` 顶层平铺 30 余个文件，服务、协议、语法分析与任务模型混在一起，测试子模块与被测代码也不在一处。现在 `src/lib.rs` 只做总图，文件按阶段分为 `app/`（web、service）、`network/`、`protocol/`（engine、wire 含原生内核、completion、http_tasks、jsd）、`syntax/`（constants、compiler、compiler_profiles、literal_strings、static_data、html、css）、`program/`（data 含 layout_store、catalog、operands、native_input）、`tasks/`（models、model_geometry、surface、locale、semantics、declared、benchmark、raster、math、identity）、`sites/`（embedded、sources）；`cpu.rs`、`version.rs` 留在根；两份 crate 级回归（原 `migration_tests.rs`、`native_regression.rs`）归入仅测试编译的 `regression/`。全部通过 `git mv` 迁移以保留历史，`crate::` 路径、`#[path]` 与 `include_str!` 深度同步改写，未改任何函数体。docs/DEVELOPMENT.md 的模块表改为按目录说明。

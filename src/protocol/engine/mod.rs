@@ -27,11 +27,12 @@ pub struct Outcome {
     pub details: Value,
     pub solved: bool,
 }
+/// Both sides are objects built by this crate; anything else is left alone
+/// so a layout gap surfaces as a protocol rejection rather than a panic.
 fn merge(target: &mut Value, source: &Value) {
-    target
-        .as_object_mut()
-        .unwrap()
-        .extend(source.as_object().unwrap().clone());
+    if let (Some(target), Some(source)) = (target.as_object_mut(), source.as_object()) {
+        target.extend(source.clone());
+    }
 }
 fn copy(target: &mut Value, source: &Value, names: &[&str]) {
     for name in names {
@@ -39,8 +40,10 @@ fn copy(target: &mut Value, source: &Value, names: &[&str]) {
     }
 }
 fn remove(target: &mut Value, names: &[&str]) {
-    for name in names {
-        target.as_object_mut().unwrap().remove(*name);
+    if let Some(target) = target.as_object_mut() {
+        for name in names {
+            target.remove(*name);
+        }
     }
 }
 fn protocol_error(code: &str, message: &str, status: u16, details: Value) -> Error {
@@ -964,7 +967,10 @@ impl Engine {
         let phase = Instant::now();
         let envelopes = array(&catalog.parameters["tasks"])?;
         for (index, id) in catalog.order.iter().enumerate() {
-            let mut fields = computed.fields.remove(id).unwrap();
+            let mut fields = computed
+                .fields
+                .remove(id)
+                .ok_or_else(|| Error::new("UNSUPPORTED_FORMAT", "Task result missing"))?;
             if fields.get("SgRiW9").is_some() {
                 fields["SgRiW9"]["HiXK5"] = json!(frame.content.len());
                 fields["SgRiW9"]["bIWk0"] = json!(frame.download_size);
@@ -975,7 +981,10 @@ impl Engine {
                 tokio::time::sleep(wait).await
             }
             let finished = epoch_ms();
-            let envelope = envelopes.iter().find(|v| v["hmwT6"] == *id).unwrap();
+            let envelope = envelopes
+                .iter()
+                .find(|v| v["hmwT6"] == *id)
+                .ok_or_else(|| Error::new("UNSUPPORTED_FORMAT", "Task envelope missing"))?;
             let mut task = envelope.clone();
             merge(&mut task, &fields);
             merge(

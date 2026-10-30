@@ -71,6 +71,7 @@ async fn upstream(State(c): State<Arc<Counters>>, r: Request) -> Response {
         "/cdn-cgi/challenge-platform/scripts/jsd/main.js" => format!("window._cf_chl_opt={{v:'b'}};var alphabet='{ALPHABET}',path='/jsd/oneshot/fixture/';/*2166136261 16777619 2779062077 Uint8Array*/").into_response(),
         "/managed" => (StatusCode::FORBIDDEN,[("cf-mitigated","challenge"),("content-type","text/html")],"<script>window._cf_chl_opt={cType:'managed'};</script>").into_response(),
         "/loop" => (StatusCode::FOUND,[("location","/loop")],"").into_response(),
+        "/bounce" => if r.headers().get("cookie").and_then(|h|h.to_str().ok()).is_some_and(|h|h.contains("bounced=1")) {(StatusCode::OK,[("content-type","text/html; charset=utf-8")],"<html>bounced once</html>").into_response()} else {(StatusCode::FOUND,[("location","/bounce"),("set-cookie","bounced=1; Path=/")],"").into_response()},
         "/missing" => (StatusCode::NOT_FOUND,[("content-type","text/html; charset=utf-8")],"<html>实际网站页面</html>").into_response(),
         "/gzip" => {let mut encoder=GzEncoder::new(Vec::new(),Compression::default());encoder.write_all(&b"test-content-".repeat(1000)).unwrap();let bytes=encoder.finish().unwrap();let mut response=(StatusCode::OK,[("content-encoding","gzip"),("set-cookie","fresh-session=value; Path=/")],bytes).into_response();let length=response.body().size_hint().exact().unwrap().to_string();response.headers_mut().insert("content-length",length.parse().unwrap());response}
         "/large" => Response::new(Body::from(vec![b'x';8*1024*1024+1])),
@@ -336,6 +337,81 @@ async fn unsupported_challenge_and_redirect_loop_never_report_success() {
     assert_eq!(r["failed"], 2);
     assert_eq!(r["success"], 0);
     assert_eq!(r["active"], 0);
+}
+#[tokio::test]
+async fn one_redirect_back_to_the_same_address_is_followed_but_a_loop_still_fails() {
+    let (server, c) = fixture().await;
+    let s = service();
+    let page = s
+        .fetch(json!({"url":server.url.clone()+"/bounce"}), false, false)
+        .await
+        .unwrap();
+    assert_eq!(page["status"], 200);
+    assert!(page["body"].as_str().unwrap().contains("bounced once"));
+    assert_eq!(c.get.load(Ordering::SeqCst), 2);
+    let error = s
+        .fetch(json!({"url":server.url.clone()+"/loop"}), false, false)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "UPSTREAM_ERROR");
+    assert!(error.message.contains("重定向循环"));
+    assert_eq!(c.get.load(Ordering::SeqCst), 4);
+}
+#[tokio::test]
+async fn framework_rejections_use_the_json_error_envelope() {
+    let server = serve(web::router(service(), String::new())).await;
+    let client = wreq::Client::builder().no_proxy().build().unwrap();
+    let cases: [(&str, &str, Option<(&str, Vec<u8>)>, u16, &str); 6] = [
+        ("GET", "/nope", None, 404, "NOT_FOUND"),
+        ("GET", "/v1/fetch", None, 405, "METHOD_NOT_ALLOWED"),
+        (
+            "POST",
+            "/v1/fetch",
+            Some(("application/json", b"{bad".to_vec())),
+            400,
+            "INVALID_REQUEST",
+        ),
+        (
+            "POST",
+            "/v1/fetch",
+            Some(("text/plain", b"{}".to_vec())),
+            415,
+            "INVALID_REQUEST",
+        ),
+        (
+            "POST",
+            "/v1/analyze",
+            Some(("application/json", vec![b' '; 1024 * 1024 + 1])),
+            413,
+            "REQUEST_TOO_LARGE",
+        ),
+        (
+            "POST",
+            "/v1/solve",
+            Some(("application/json", b"[]".to_vec())),
+            400,
+            "INVALID_REQUEST",
+        ),
+    ];
+    for (method, path, body, status, code) in cases {
+        let mut request = client.request(
+            wreq::Method::from_bytes(method.as_bytes()).unwrap(),
+            format!("{}{path}", server.url),
+        );
+        if let Some((kind, bytes)) = body {
+            request = request.header("content-type", kind).body(bytes);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), status, "{method} {path}");
+        assert!(response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("application/json"));
+        let reply: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(reply["ok"], false, "{method} {path}");
+        assert_eq!(reply["code"], code, "{method} {path}");
+        assert!(reply["error"].as_str().is_some_and(|m| !m.is_empty()));
+    }
 }
 #[tokio::test]
 async fn verified_reads_are_four_way_and_distinct() {
