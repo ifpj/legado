@@ -69,6 +69,13 @@ mod embedded_completion_tests {
         missing[15] = "short";
         assert!(form_fields(&missing, 0).is_err());
         assert!(form_fields(&[], 0).is_err());
+        let opaque = format!("Cu{}", "x".repeat(268));
+        let mut current = values.clone();
+        current[15] = &opaque;
+        assert_eq!(form_fields(&current, 0).unwrap(), ([8, 11, 14], 15));
+        let malformed = format!("Cw{}", "x".repeat(268));
+        current[15] = &malformed;
+        assert!(form_fields(&current, 0).is_err());
     }
     #[test]
     fn completion_token_is_bound_to_the_complete_message_not_stoken() {
@@ -245,7 +252,8 @@ fn form_fields(values: &[&str], start: usize) -> Result<([usize; 3], usize)> {
             && names.iter().collect::<HashSet<_>>().len() == 3
             && values.get(token).is_some_and(|v| {
                 (100..=16384).contains(&v.len())
-                    && re(r"^[A-Za-z0-9_.-]+-[0-9]{10}-1\.0\.1\.1-[A-Za-z0-9_.-]+$").is_match(v)
+                    && (re(r"^[A-Za-z0-9_.-]+-[0-9]{10}-1\.0\.1\.1-[A-Za-z0-9_.-]+$").is_match(v)
+                        || data::opaque_token(v))
             }),
         "Parent form fields",
     )?;

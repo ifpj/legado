@@ -1221,13 +1221,9 @@ impl Response {
         let hi = self.literals.partition_point(|l| l.start < end);
         self.literals[lo..hi].iter().collect()
     }
-    pub fn root(&self) -> Result<Value> {
+    pub fn root(&self, plan: &Plan) -> Result<Value> {
         let values = self.values();
-        let tokens: HashSet<_> = values
-            .iter()
-            .filter(|v| token(v) && v.contains("-1.3.1.1-"))
-            .copied()
-            .collect();
+        let tokens: HashSet<_> = values.iter().filter(|v| state_token(v)).copied().collect();
         let ext: HashSet<_> = self
             .literals
             .iter()
@@ -1243,11 +1239,68 @@ impl Response {
             .iter()
             .filter(|v| **v != state && values.iter().filter(|x| **x == **v).count() > 1)
             .copied())?;
+        let rest: Vec<_> = tokens
+            .into_iter()
+            .filter(|v| *v != state && *v != repeated)
+            .collect();
+        let sitekey = self.one(r"^0x4[A-Za-z0-9_-]{15,40}$")?;
+        let (task, page_data) = if values.iter().any(|v| re(TASK).is_match(v)) {
+            (self.one(TASK)?, one(rest.iter().copied())?)
+        } else {
+            self.opaque_roles(plan, &sitekey, &rest)?
+        };
         Ok(
-            json!({"sitekey":self.one(r"^0x4[A-Za-z0-9_-]{15,40}$")?,"flow":self.one(FLOW)?,"hmwT6":self.one(TASK)?,"nuvy8":json_input(&values)?,"nidg0":self.one(NONCE)?,"yVlbA2":state,"vaZBm3":repeated,"pageData":one(tokens.into_iter().filter(|v|*v!=state&&*v!=repeated))?}),
+            json!({"sitekey":sitekey,"flow":self.one(FLOW)?,"hmwT6":task,"nuvy8":json_input(&values)?,"nidg0":self.one(NONCE)?,"yVlbA2":state,"vaZBm3":repeated,"pageData":page_data}),
         )
     }
+    /// Opcode of the instruction after an inline packed constant.
+    fn following_opcode(&self, plan: &Plan, start: usize) -> Result<u8> {
+        let literals = self.between(start, start + 1);
+        let literal = literals
+            .iter()
+            .find(|l| l.packed.is_some())
+            .ok_or_else(|| Error::new("INVALID_DATA", "Packed operand boundary"))?;
+        require(
+            literal.start < literal.end && literal.end < self.program.code_length,
+            "Packed operand boundary",
+        )?;
+        let f = &plan.format;
+        Ok(f.opcode(
+            self.raw[literal.end],
+            literal.instruction_key(&self.raw, f),
+            literal.end,
+        ))
+    }
+    /// Opaque page data is consumed by the same instruction as the site
+    /// key; the task identifier belongs to the per-round operand group.
+    fn opaque_roles(&self, plan: &Plan, sitekey: &str, rest: &[&str]) -> Result<(String, String)> {
+        require(
+            rest.len() == 2 && rest.iter().all(|v| opaque_token(v)),
+            "Opaque root operands",
+        )?;
+        let followers = |value: &str| -> Result<HashSet<u8>> {
+            self.packed
+                .iter()
+                .filter(|(_, v)| v == value)
+                .map(|(p, _)| self.following_opcode(plan, *p))
+                .collect()
+        };
+        let site = followers(sitekey)?;
+        require(site.len() == 1, "Opaque root site-key instruction")?;
+        let mut page = Vec::new();
+        for value in rest {
+            if followers(value)? == site {
+                page.push(*value);
+            }
+        }
+        require(page.len() == 1, "Opaque root page-data role")?;
+        let task = rest.iter().find(|v| **v != page[0]).unwrap();
+        Ok((task.to_string(), page[0].to_string()))
+    }
 }
+#[cfg(test)]
+#[path = "data/opaque_root_tests.rs"]
+mod opaque_root_tests;
 pub const FLOW: &str = r"^/fo/[0-9]+:[0-9]+:[A-Za-z0-9_-]+/[a-fA-F0-9]{16,32}/[A-Za-z0-9_.-]+$";
 #[cfg(test)]
 mod range_tests {
@@ -1331,8 +1384,21 @@ mod range_tests {
 }
 pub const TASK: &str = r"^[A-Za-z0-9_.-]+-[0-9]{10}-1\.2\.1\.1-[A-Za-z0-9_.-]+$";
 pub const NONCE: &str = r"^[A-Za-z0-9_-]{43}$";
-pub fn token(v: &str) -> bool {
+pub fn legacy_token(v: &str) -> bool {
     re(r"^[A-Za-z0-9_.-]+-[0-9]{10}-1\.[23]\.1\.1-[A-Za-z0-9_.-]+$").is_match(v)
+}
+/// Current challenge operands are opaque base64url envelopes. "C[g-v]"
+/// fixes their first decoded byte to 0x0a; legacy values stay accepted.
+pub fn opaque_token(v: &str) -> bool {
+    (64..=16384).contains(&v.len()) && v.len() % 4 != 1 && re(r"^C[g-v][A-Za-z0-9_-]+$").is_match(v)
+}
+pub fn token(v: &str) -> bool {
+    legacy_token(v) || opaque_token(v)
+}
+/// Values of the state class. Opaque envelopes no longer expose a 1.2/1.3
+/// marker, so their role must be assigned from program structure.
+pub fn state_token(v: &str) -> bool {
+    (legacy_token(v) && v.contains("-1.3.1.1-")) || opaque_token(v)
 }
 pub fn one<'a>(values: impl IntoIterator<Item = &'a str>) -> Result<String> {
     let s: HashSet<_> = values.into_iter().collect();

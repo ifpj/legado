@@ -621,7 +621,8 @@ impl Engine {
             phase_ms["parentCompletion"] = json!(parent_started.elapsed().as_millis() as u64);
             summary = json!({"taskCount":1,"nativeComputedCount":1,"nativeTaskKinds":["native-precursor-telemetry"]});
         } else {
-            let parameters = crate::cpu::run(deadline, move || data.root()).await?;
+            let root_plan = p.clone();
+            let parameters = crate::cpu::run(deadline, move || data.root(&root_plan)).await?;
             let (completion, frame_summary) = self
                 .frame(
                     s.clone(),
