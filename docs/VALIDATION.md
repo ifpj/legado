@@ -10,6 +10,8 @@
 4. 服务收到 Ctrl+C 或 SIGTERM 时直接被终止；现在停止接受新连接并让进行中的请求在各自总时限内完成，`docker stop` 可以干净地结束容器。
 5. 去掉可被外部数据触发的 panic：`/image` 的 Content-Type、`/fetch` 的计时响应头改为有回退值的构造；引擎里任务结果缺失、任务信封缺失由 `unwrap` 改为 `UNSUPPORTED_FORMAT`，`merge`／`remove` 在非对象上不再 panic。
 
+项目级收尾：直接依赖 `cssparser` 在源码中没有任何引用（CSS 事实由 `syntax/css.rs` 自行读取，`scraper` 仍传递依赖它），从 Cargo.toml 移除，Cargo.lock 只少一行；`profiles/`、`tests/fixtures/`、`assets/` 下每个文件都核对到了引用处；compose.yaml、CI 发布任务的标签推导、`scripts/dev.ps1` 的 `release`/`stop`/`status`、README 的接口表与路由一致。
+
 通读但未改动：`cpu.rs` 的名额与缓存锁让出、`transport.rs` 回环 SOCKS 桥与预连、`layout_store.rs` 的原子写入与 Unix 0700 检查、`kernel.rs` 五个 `extern "C"` 内核的指针与边界、`resolver.rs` 的 DoH 单飞与 TTL，都与注释一致，没有发现越界、泄漏或死锁路径；`clippy` 的 515 条 `result_large_err` 与若干风格提示未处理。
 
 验证：新增 `one_redirect_back_to_the_same_address_is_followed_but_a_loop_still_fails`（跳回同址一次后取得页面、无限循环仍失败且只多发一次请求）与 `framework_rejections_use_the_json_error_envelope`（404、405、400、415、413 与非对象 JSON 六种情形）；容器冒烟增加未知路径的 404 格式检查。`scripts/dev.ps1 test` 为 209 项通过、5 项手动剖析忽略，Node 语法与三份契约通过。
