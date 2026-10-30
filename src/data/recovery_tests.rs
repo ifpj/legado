@@ -486,3 +486,49 @@ fn property_boundary_accepts_only_the_supported_pool_form_and_verified_tail() {
             .contains(&7));
     }
 }
+
+fn loop_fixture() -> (Vec<u8>, Vec<Literal>, Plan) {
+    let (_, _, mut plan) = fixture("so.");
+    plan.meta["input_data_profile"] = json!({"flow-read":[43,[0,0,0],{}],"flow-jump":[41,[0,0,0,127],{"b16":0,"b8":1,"b0":2,"key":3}]});
+    let mut raw = vec![0; 24];
+    raw[4] = 43 ^ 7;
+    // Back-edge to 4 restores key 7: values[3] ^ 127 == 7.
+    raw[8..13].copy_from_slice(&[41 ^ 7, 0 ^ 7, 0 ^ 7, 4 ^ 7, 127]);
+    let make = |start, end, value: &str| Literal {
+        key: Some(7),
+        start,
+        end,
+        value: value.into(),
+        packed: None,
+        continuation: 0,
+        pool_offset: 0,
+    };
+    (
+        raw,
+        vec![make(0, 4, "this"), make(8, 13, "WebGL2RenderingContext")],
+        plan,
+    )
+}
+
+#[test]
+fn loop_back_edge_to_the_same_decoded_state_claims_its_operands() {
+    let (raw, literals, plan) = loop_fixture();
+    assert!(conflicting_literals(&raw, &literals, &plan)
+        .unwrap()
+        .contains(&8));
+    for mode in 0..4 {
+        let (mut bytes, literals, mut plan) = loop_fixture();
+        match mode {
+            0 => bytes[12] ^= 1,     // returns with a different key
+            1 => bytes[11] = 2 ^ 7,  // returns to an undecoded offset
+            2 => bytes[11] = 13 ^ 7, // forward jump without a boundary
+            _ => plan.meta["input_data_profile"]["flow-read"] = Value::Null,
+        }
+        assert!(
+            !conflicting_literals(&bytes, &literals, &plan)
+                .unwrap()
+                .contains(&8),
+            "mode {mode}"
+        );
+    }
+}

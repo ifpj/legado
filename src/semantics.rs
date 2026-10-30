@@ -491,6 +491,62 @@ pub fn calculate(c: &Context<'_>, results: &mut Results) -> Result<()> {
     }
     Ok(())
 }
+/// Shared root-operand block: fixed field names, each followed by its packed
+/// value. Layout randomisation can place it before the first task identifier,
+/// inside the last module's span. Exclude it only when its submit, nonce and
+/// state values are exactly this response's frame parameters.
+fn operand_block(c: &Context<'_>) -> Option<(usize, usize)> {
+    const FIELDS: [&str; 13] = [
+        "qrKd7", "vaZBm3", "nidg0", "gRYZ0", "yVlbA2", "TYrU7", "Hoqd1", "vvfHL3", "lffN9",
+        "bkOl5", "gfOgY8", "Bxtcq6", "jLEVv0",
+    ];
+    let r = c.response;
+    let value_after = |l: &crate::data::Literal| -> Option<&str> {
+        let next = r
+            .between(l.end, l.end + 33)
+            .into_iter()
+            .find(|x| x.packed.is_some())?;
+        let i = r
+            .packed
+            .binary_search_by_key(&next.start, |(p, _)| *p)
+            .ok()?;
+        Some(r.packed[i].1.as_str())
+    };
+    let names = |name: &'static str| {
+        r.literals
+            .iter()
+            .filter(move |l| l.packed.is_none() && l.value == name)
+    };
+    let anchor = |name: &'static str| -> Option<usize> {
+        let want = c.catalog.parameters[name].as_str()?;
+        let found: Vec<_> = names(name)
+            .filter(|l| value_after(l) == Some(want))
+            .map(|l| l.start)
+            .collect();
+        (found.len() == 1).then(|| found[0])
+    };
+    let (submit, nonce, state) = (anchor("vaZBm3")?, anchor("nidg0")?, anchor("yVlbA2")?);
+    if !(submit < nonce && nonce < state && state - submit <= 4096) {
+        return None;
+    }
+    let start = names("qrKd7")
+        .filter(|l| l.start < submit && submit - l.start <= 8192 && value_after(l) == Some("[]"))
+        .map(|l| l.start)
+        .max()?;
+    let end = names("jLEVv0")
+        .filter(|l| state < l.start && l.start - state <= 1024)
+        .map(|l| l.end)
+        .min()?;
+    let names: Vec<_> = r
+        .between(start, end)
+        .into_iter()
+        .filter(|l| l.packed.is_none() && !l.value.is_empty())
+        .map(|l| l.value.as_str())
+        .collect();
+    let distinct: HashSet<_> = names.iter().copied().collect();
+    (names.len() == FIELDS.len() && FIELDS.iter().all(|f| distinct.contains(f)))
+        .then_some((start, end))
+}
 pub fn callbacks(c: &Context<'_>, results: &mut Results) -> Result<()> {
     if c.plan.meta["build"] != "d2d3316b729e" {
         return Ok(());
@@ -506,6 +562,7 @@ pub fn callbacks(c: &Context<'_>, results: &mut Results) -> Result<()> {
     }
     let mut candidates = Vec::new();
     let last = c.catalog.modules.iter().map(|m| m.start).max().unwrap_or(0);
+    let block = operand_block(c);
     for m in &c.catalog.modules {
         crate::cpu::check()?;
         if results.fields.contains_key(&m.id) {
@@ -553,6 +610,7 @@ pub fn callbacks(c: &Context<'_>, results: &mut Results) -> Result<()> {
                             && l.start < registry
                             && l.packed.is_none()
                             && !matches!(l.value.as_str(), "" | "hmwT6")
+                            && !block.is_some_and(|(a, b)| a <= l.start && l.start < b)
                     })
                     .collect();
                 let array_tail = trailing.len() == 1
@@ -602,6 +660,10 @@ pub fn callbacks(c: &Context<'_>, results: &mut Results) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "semantics/callback_tests.rs"]
+mod callback_tests;
 
 #[cfg(test)]
 mod tests {

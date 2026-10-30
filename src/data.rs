@@ -1532,9 +1532,12 @@ fn conflicting_literals_proving(
             Vec::new(),
             HashSet::new(),
             0,
+            Vec::<(usize, u8)>::new(),
         )];
         let mut forks = 0;
-        while let Some((mut position, mut key, mut spans, mut branches, depth)) = pending.pop() {
+        while let Some((mut position, mut key, mut spans, mut branches, depth, mut visited)) =
+            pending.pop()
+        {
             for step in depth..24 {
                 if budget == 0 {
                     return Ok(conflicts);
@@ -1544,6 +1547,7 @@ fn conflicting_literals_proving(
                     break;
                 }
                 let at = position;
+                visited.push((at, key));
                 let opcode = f.opcode(raw[position], key, position);
                 key = f.key(key, opcode);
                 if opcode == f.state_step {
@@ -1622,7 +1626,14 @@ fn conflicting_literals_proving(
                         if forks < 24 && target < raw.len().min(anchor.end + 512) {
                             let next = f.byte(raw[at + 1 + uint(&roles["key"])?], key)
                                 ^ uint(&roles["keyMask"])? as u8;
-                            pending.push((target, next, spans.clone(), branches.clone(), step + 1));
+                            pending.push((
+                                target,
+                                next,
+                                spans.clone(),
+                                branches.clone(),
+                                step + 1,
+                                visited.clone(),
+                            ));
                             forks += 1;
                         }
                     }
@@ -1668,6 +1679,7 @@ fn conflicting_literals_proving(
                                     alternate_spans,
                                     alternate_branches,
                                     step + 1,
+                                    visited.clone(),
                                 ));
                                 forks += 1;
                             }
@@ -1676,7 +1688,14 @@ fn conflicting_literals_proving(
                             alternate_spans.push((at, end));
                             let mut alternate_branches = branches.clone();
                             alternate_branches.insert(at);
-                            pending.push((end, key, alternate_spans, alternate_branches, step + 1));
+                            pending.push((
+                                end,
+                                key,
+                                alternate_spans,
+                                alternate_branches,
+                                step + 1,
+                                visited.clone(),
+                            ));
                             forks += 1;
                         }
                         let next = f.byte(raw[at + 1 + uint(&roles["key"])?], key)
@@ -1695,10 +1714,19 @@ fn conflicting_literals_proving(
                         let target = ((values[uint(&roles["b16"])?] as usize) << 16)
                             | ((values[uint(&roles["b8"])?] as usize) << 8)
                             | values[uint(&roles["b0"])?] as usize;
+                        let next = values[uint(&roles["key"])?] ^ uint(&masks[3])? as u8;
                         if target < position + 5 {
+                            // A loop back-edge proves the path only if it
+                            // returns to an instruction already decoded on
+                            // this path with the identical key state.
+                            if visited.contains(&(target, next)) {
+                                spans.push((at, at + 5));
+                                if spans.len() >= 2 {
+                                    commit(&spans, &branches, &mut conflicts);
+                                }
+                            }
                             break;
                         }
-                        let next = values[uint(&roles["key"])?] ^ uint(&masks[3])? as u8;
                         position = target;
                         spans.push((at, at + 5));
                         key = next;
