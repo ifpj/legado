@@ -306,7 +306,7 @@ fn profile_syntax_indexes() {
         let reparsed = crate::cpu::parse_reusing(
             &mut tree_sitter::Parser::new(),
             prepared.source.as_ref(),
-            prepared.tree.as_ref(),
+            prepared.tree().as_ref(),
         );
         stage("reparse_attempt");
         let syntax = constants::Tables::syntax(tree.root_node(), &source).unwrap();

@@ -376,7 +376,7 @@ pub struct Plan {
 }
 pub(crate) struct PendingSealed {
     source: String,
-    tree: Option<tree_sitter::Tree>,
+    edited: Option<crate::literal_strings::EditedSyntax>,
     expected: Value,
     early: EarlySealed,
 }
@@ -402,7 +402,11 @@ impl PendingSealed {
         self
     }
     pub(crate) fn validate(self) -> Result<()> {
-        let current = crate::compiler::current_sealed(&self.source, self.tree.as_ref())?;
+        let tree = self
+            .edited
+            .as_ref()
+            .map(crate::literal_strings::EditedSyntax::apply);
+        let current = crate::compiler::current_sealed(&self.source, tree.as_ref())?;
         bind_current_sealed(&mut json!({"sealed_literals":self.expected}), current)
     }
     /// Decoding replaces only decoder calls with string literals. If the key
@@ -513,7 +517,7 @@ impl Plan {
                 )
             },
             || {
-                let plan = crate::compiler::compile_prepared(source, frame, prepared.tree.clone())?;
+                let plan = crate::compiler::compile_prepared(source, frame, prepared.tree())?;
                 let mut meta = plan.meta.clone();
                 // Declaration spelling is diagnostic, not layout identity.
                 // Every reuse below re-resolves the current lexical binding
@@ -532,13 +536,13 @@ impl Plan {
         let validation = if meta["build"] == "c787ce48cf6b" && defer {
             Some(PendingSealed {
                 source: source.to_owned(),
-                tree: prepared.tree,
+                edited: prepared.edited,
                 expected: meta["sealed_literals"].clone(),
                 early: EarlySealed::default(),
             })
         } else {
             if meta["build"] == "c787ce48cf6b" {
-                let current = crate::compiler::current_sealed(source, prepared.tree.as_ref())?;
+                let current = crate::compiler::current_sealed(source, prepared.tree().as_ref())?;
                 bind_current_sealed(&mut meta, current)?;
             }
             None
@@ -590,7 +594,7 @@ mod sealed_layout_reuse_tests {
         let expected = json!({"iv":[1,2,3,4,5,6,7,8],"version":1});
         PendingSealed {
             source: source.into(),
-            tree: None,
+            edited: None,
             expected: expected.clone(),
             early: EarlySealed::default(),
         }
@@ -598,7 +602,7 @@ mod sealed_layout_reuse_tests {
         .unwrap();
         assert!(PendingSealed {
             source: source.replace("7-6", "7-5"),
-            tree: None,
+            edited: None,
             expected,
             early: EarlySealed::default(),
         }
@@ -640,7 +644,7 @@ mod sealed_layout_reuse_tests {
         let pending = |source: String, early: Result<Value>| {
             PendingSealed {
                 source,
-                tree: None,
+                edited: None,
                 expected: expected.clone(),
                 early: EarlySealed::default(),
             }

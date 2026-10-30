@@ -38,16 +38,17 @@ fn same_reference<'a>(t: &Tables<'a>, n: Node<'a>, target: Node<'a>, reference: 
 }
 pub(super) fn profile(t: &Tables<'_>) -> Result<Value> {
     let mut choices = Vec::new();
+    let kinds = crate::constants::Kinds::get();
     for function in t
         .all()
         .iter()
         .copied()
-        .filter(|n| n.kind() == "function_declaration")
+        .filter(|n| n.kind_id() == kinds.function_declaration)
     {
         for array in t
             .walk(child(function, "body")?, false)
             .into_iter()
-            .filter(|n| n.kind() == "array")
+            .filter(|n| n.kind_id() == kinds.array)
         {
             let items = children(array);
             if items.len() != 6 || items[5].kind() != "array" {

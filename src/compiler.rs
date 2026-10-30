@@ -987,7 +987,7 @@ pub(crate) fn recover_material(encoded: &str, f: &Format, names: &HashSet<&str>)
 }
 pub fn compile(source: &str, frame: bool) -> Result<Plan> {
     let prepared = crate::literal_strings::prepare_for_compile(source)?;
-    compile_prepared(prepared.source.as_ref(), frame, prepared.tree)
+    compile_prepared(prepared.source.as_ref(), frame, prepared.tree())
 }
 pub(crate) fn compile_prepared(
     source: &str,

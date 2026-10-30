@@ -3,7 +3,7 @@ use crate::{math::number, re, require, static_data::unquote, Error, Result};
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 use tree_sitter::Node;
 mod env;
@@ -99,7 +99,64 @@ pub fn children(n: Node<'_>) -> Vec<Node<'_>> {
         .filter(|n| n.kind() != "comment")
         .collect()
 }
+/// Numeric ids of the node types compared on traversal hot paths. For the
+/// named nodes a walk keeps, `Node::kind_id` equality is the same test as
+/// `Node::kind` string equality and several times cheaper.
+pub(crate) struct Kinds {
+    pub comment: u16,
+    pub program: u16,
+    pub function_declaration: u16,
+    pub function_expression: u16,
+    pub arrow_function: u16,
+    pub method_definition: u16,
+    pub variable_declarator: u16,
+    pub call_expression: u16,
+    pub identifier: u16,
+    pub assignment_expression: u16,
+    pub augmented_assignment_expression: u16,
+    pub update_expression: u16,
+    pub array: u16,
+}
+impl Kinds {
+    pub(crate) fn get() -> &'static Kinds {
+        static KINDS: OnceLock<Kinds> = OnceLock::new();
+        KINDS.get_or_init(|| {
+            let language: tree_sitter::Language = tree_sitter_javascript::LANGUAGE.into();
+            let id = |name: &str| {
+                let id = language.id_for_node_kind(name, true);
+                assert!(id != 0, "unknown JavaScript node kind {name}");
+                id
+            };
+            Kinds {
+                comment: id("comment"),
+                program: id("program"),
+                function_declaration: id("function_declaration"),
+                function_expression: id("function_expression"),
+                arrow_function: id("arrow_function"),
+                method_definition: id("method_definition"),
+                variable_declarator: id("variable_declarator"),
+                call_expression: id("call_expression"),
+                identifier: id("identifier"),
+                assignment_expression: id("assignment_expression"),
+                augmented_assignment_expression: id("augmented_assignment_expression"),
+                update_expression: id("update_expression"),
+                array: id("array"),
+            }
+        })
+    }
+    /// A function boundary: declarations, expressions and arrows.
+    pub(crate) fn is_function(&self, kind: u16) -> bool {
+        kind == self.function_declaration
+            || kind == self.function_expression
+            || kind == self.arrow_function
+    }
+    /// Where a non-descending walk stops: functions and methods.
+    pub(crate) fn is_boundary(&self, kind: u16) -> bool {
+        self.is_function(kind) || kind == self.method_definition
+    }
+}
 pub fn walk(n: Node<'_>, descend: bool) -> Vec<Node<'_>> {
+    let kinds = Kinds::get();
     let mut cursor = n.walk();
     let mut out = vec![n];
     let mut enter = true;
@@ -118,22 +175,16 @@ pub fn walk(n: Node<'_>, descend: bool) -> Vec<Node<'_>> {
             }
         }
         let node = cursor.node();
-        if !node.is_named() || node.kind() == "comment" {
+        if !node.is_named() || node.kind_id() == kinds.comment {
             enter = false;
             continue;
         }
         out.push(node);
-        enter = descend
-            || !matches!(
-                node.kind(),
-                "function_declaration"
-                    | "function_expression"
-                    | "arrow_function"
-                    | "method_definition"
-            );
+        enter = descend || !kinds.is_boundary(node.kind_id());
     }
 }
 pub(crate) fn scope_index<'a>(nodes: &[Node<'a>], methods: bool) -> HashMap<usize, Node<'a>> {
+    let kinds = Kinds::get();
     let mut owners = HashMap::with_capacity(nodes.len());
     let mut pending = Vec::<Node<'a>>::new();
     for (index, node) in nodes.iter().copied().enumerate() {
@@ -149,10 +200,10 @@ pub(crate) fn scope_index<'a>(nodes: &[Node<'a>], methods: bool) -> HashMap<usiz
         if let Some(owner) = pending.last() {
             owners.insert(node.id(), *owner);
         }
-        if matches!(
-            node.kind(),
-            "program" | "function_declaration" | "function_expression" | "arrow_function"
-        ) || methods && node.kind() == "method_definition"
+        let kind = node.kind_id();
+        if kind == kinds.program
+            || kinds.is_function(kind)
+            || methods && kind == kinds.method_definition
         {
             pending.push(node);
         }
@@ -253,15 +304,7 @@ impl<'a> Tables<'a> {
         while index < end {
             let current = self.nodes[index];
             out.push(current);
-            if index != start
-                && matches!(
-                    current.kind(),
-                    "function_declaration"
-                        | "function_expression"
-                        | "arrow_function"
-                        | "method_definition"
-                )
-            {
+            if index != start && Kinds::get().is_boundary(current.kind_id()) {
                 index = self
                     .nodes
                     .partition_point(|n| n.start_byte() < current.end_byte())

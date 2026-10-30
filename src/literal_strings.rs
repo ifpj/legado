@@ -1,6 +1,6 @@
 //! Decode an explicitly recognized literal-only encoding. No source is run.
 use crate::{
-    constants::{children, unwrap, walk},
+    constants::{children, unwrap, walk, Kinds},
     require, Error, Result,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -105,48 +105,149 @@ fn decode(encoded: &str, mut seed: u16) -> Result<String> {
     String::from_utf16(&units).map_err(|_| Error::new("INVALID_DATA", "Invalid literal UTF-16"))
 }
 
-fn bindings<'a>(node: Node<'a>, source: &'a str) -> HashMap<&'a str, Vec<Node<'a>>> {
-    let body = node.child_by_field_name("body").unwrap_or(node);
-    let mut bindings: HashMap<_, Vec<_>> = HashMap::new();
-    for n in walk(body, false) {
-        let target = match n.kind() {
-            "variable_declarator" | "function_declaration" => n.child_by_field_name("name"),
-            "assignment_expression" | "augmented_assignment_expression" => {
-                n.child_by_field_name("left")
+/// Preorder scope ownership of one parse, built in a single pass. `owner`
+/// follows lexical function scopes (methods are transparent, as before);
+/// `shallow` additionally stops at methods, which is what a non-descending
+/// walk of a function body sees. `end` is the preorder end of each scope.
+struct ScopeMap {
+    owner: Vec<u32>,
+    shallow: Vec<u32>,
+    end: Vec<u32>,
+}
+impl ScopeMap {
+    fn new(nodes: &[Node<'_>]) -> Result<Self> {
+        let kinds = Kinds::get();
+        let count = nodes.len();
+        let (mut owner, mut shallow, mut end) = (
+            vec![0u32; count],
+            vec![0u32; count],
+            vec![count as u32; count],
+        );
+        let (mut functions, mut scopes) = (Vec::<usize>::new(), Vec::<usize>::new());
+        for (index, node) in nodes.iter().enumerate() {
+            if index % 1024 == 0 {
+                crate::cpu::check()?;
             }
-            "update_expression" => n.child_by_field_name("argument"),
-            _ => None,
-        };
-        if let Some(target) = target.filter(|n| n.kind() == "identifier") {
-            bindings
-                .entry(&source[target.byte_range()])
-                .or_default()
-                .push(n);
+            let start = node.start_byte();
+            while functions
+                .last()
+                .is_some_and(|&top| nodes[top].end_byte() <= start)
+            {
+                functions.pop();
+            }
+            while scopes
+                .last()
+                .is_some_and(|&top| nodes[top].end_byte() <= start)
+            {
+                end[scopes.pop().unwrap()] = index as u32;
+            }
+            owner[index] = functions.last().copied().unwrap_or(index) as u32;
+            shallow[index] = scopes.last().copied().unwrap_or(index) as u32;
+            let kind = node.kind_id();
+            if kind == kinds.program || kinds.is_function(kind) {
+                functions.push(index);
+            }
+            if kind == kinds.program || kinds.is_boundary(kind) {
+                scopes.push(index);
+            }
         }
+        Ok(Self {
+            owner,
+            shallow,
+            end,
+        })
     }
-    if let Some(params) = node.child_by_field_name("parameters") {
-        for param in children(params)
-            .into_iter()
-            .filter(|n| n.kind() == "identifier")
-        {
+    fn owner(&self, index: usize) -> usize {
+        self.owner[index] as usize
+    }
+    /// Names bound directly in `scope`: declarations, function names,
+    /// assignment and update targets of its body (not of nested functions or
+    /// methods), plus its own parameters. Values are node indices.
+    fn bindings<'a>(
+        &self,
+        scope: usize,
+        nodes: &[Node<'a>],
+        source: &'a str,
+    ) -> HashMap<&'a str, Vec<usize>> {
+        let kinds = Kinds::get();
+        let node = nodes[scope];
+        let body = node.child_by_field_name("body").unwrap_or(node);
+        let (body_start, body_end) = (body.start_byte(), body.end_byte());
+        let mut bindings: HashMap<_, Vec<_>> = HashMap::new();
+        for index in scope..self.end[scope] as usize {
+            let n = nodes[index];
+            if self.shallow[index] as usize != scope
+                || n.start_byte() < body_start
+                || n.end_byte() > body_end
+            {
+                continue;
+            }
+            let kind = n.kind_id();
+            let target = if kind == kinds.variable_declarator || kind == kinds.function_declaration
+            {
+                n.child_by_field_name("name")
+            } else if kind == kinds.assignment_expression
+                || kind == kinds.augmented_assignment_expression
+            {
+                n.child_by_field_name("left")
+            } else if kind == kinds.update_expression {
+                n.child_by_field_name("argument")
+            } else {
+                None
+            };
+            if let Some(target) = target.filter(|n| n.kind_id() == kinds.identifier) {
+                bindings
+                    .entry(&source[target.byte_range()])
+                    .or_default()
+                    .push(index);
+            }
+        }
+        if let Some(params) = node.child_by_field_name("parameters") {
+            for param in children(params)
+                .into_iter()
+                .filter(|n| n.kind_id() == kinds.identifier)
+            {
+                bindings
+                    .entry(&source[param.byte_range()])
+                    .or_default()
+                    .push(usize::MAX);
+            }
+        }
+        if let Some(param) = node.child_by_field_name("parameter") {
             bindings
                 .entry(&source[param.byte_range()])
                 .or_default()
-                .push(param);
+                .push(usize::MAX);
         }
-    }
-    if let Some(param) = node.child_by_field_name("parameter") {
         bindings
-            .entry(&source[param.byte_range()])
-            .or_default()
-            .push(param);
     }
-    bindings
 }
 
+/// The original syntax tree plus the literal edits, applied on demand. The
+/// layout-reuse path never needs the edited tree, so the edit work is only
+/// paid by compilation and by the complete sealed-key fallback.
+pub(crate) struct EditedSyntax {
+    original: tree_sitter::Tree,
+    edits: Vec<tree_sitter::InputEdit>,
+}
+impl EditedSyntax {
+    pub(crate) fn apply(&self) -> tree_sitter::Tree {
+        let mut edited = self.original.clone();
+        for edit in &self.edits {
+            edited.edit(edit);
+        }
+        edited
+    }
+}
 pub(crate) struct Prepared<'a> {
     pub source: Cow<'a, str>,
-    pub tree: Option<tree_sitter::Tree>,
+    pub(crate) edited: Option<EditedSyntax>,
+}
+impl Prepared<'_> {
+    /// Incrementally parsing `source` from this tree matches a complete parse.
+    pub(crate) fn tree(&self) -> Option<tree_sitter::Tree> {
+        self.edited.as_ref().map(EditedSyntax::apply)
+    }
 }
 pub fn prepare(source: &str) -> Result<Cow<'_, str>> {
     Ok(prepare_inner(source, false, None)?.source)
@@ -169,20 +270,22 @@ fn prepare_inner<'a>(
     if !source.contains("atob") || !source.contains("fromCharCode.apply") {
         return Ok(Prepared {
             source: Cow::Borrowed(source),
-            tree: None,
+            edited: None,
         });
     }
     require(source.len() <= 8 * 1024 * 1024, "Initializer size limit")?;
     let tree = crate::cpu::parse_reusing(&mut parser(), source, previous)?;
     require(!tree.root_node().has_error(), "Literal syntax unsupported")?;
+    let kinds = Kinds::get();
     let nodes = walk(tree.root_node(), true);
-    let scopes = crate::constants::scope_index(&nodes, false);
-    let owner = |node: Node<'_>| scopes.get(&node.id()).copied().unwrap_or(tree.root_node());
+    let scopes = ScopeMap::new(&nodes)?;
     let mut recipes = HashMap::new();
     let mut owners = HashMap::new();
-    for node in &nodes {
-        crate::cpu::check()?;
-        if node.kind() != "variable_declarator" {
+    for (index, node) in nodes.iter().enumerate() {
+        if index % 256 == 0 {
+            crate::cpu::check()?;
+        }
+        if node.kind_id() != kinds.variable_declarator {
             continue;
         }
         let (Some(name), Some(value)) = (
@@ -191,36 +294,48 @@ fn prepare_inner<'a>(
         ) else {
             continue;
         };
-        if name.kind() != "identifier" {
+        if name.kind_id() != kinds.identifier {
             continue;
         }
         if let Some(seed) = recipe_seed(unwrap(value), source) {
-            let owner = owner(*node);
-            recipes.insert(node.id(), seed);
+            let owner = scopes.owner(index);
+            recipes.insert(index, seed);
             owners
-                .entry(owner.id())
-                .or_insert_with(|| bindings(owner, source));
+                .entry(owner)
+                .or_insert_with(|| scopes.bindings(owner, &nodes, source));
         }
     }
     if recipes.is_empty() {
         return Ok(Prepared {
             source: Cow::Borrowed(source),
-            tree: retain_tree.then(|| tree.clone()),
+            edited: retain_tree.then(|| EditedSyntax {
+                original: tree,
+                edits: Vec::new(),
+            }),
         });
     }
-    let names: HashSet<_> = nodes
-        .iter()
-        .filter(|n| recipes.contains_key(&n.id()))
-        .map(|n| &source[n.child_by_field_name("name").unwrap().byte_range()])
+    let names: HashSet<_> = recipes
+        .keys()
+        .map(|&index| {
+            &source[nodes[index]
+                .child_by_field_name("name")
+                .unwrap()
+                .byte_range()]
+        })
         .collect();
     let mut replacements = Vec::new();
     let mut output_len = source.len();
-    for node in nodes.iter().filter(|n| n.kind() == "call_expression") {
-        crate::cpu::check()?;
+    for (index, node) in nodes.iter().enumerate() {
+        if index % 256 == 0 {
+            crate::cpu::check()?;
+        }
+        if node.kind_id() != kinds.call_expression {
+            continue;
+        }
         let Some(callee) = node
             .child_by_field_name("function")
             .map(unwrap)
-            .filter(|n| n.kind() == "identifier")
+            .filter(|n| n.kind_id() == kinds.identifier)
         else {
             continue;
         };
@@ -228,20 +343,20 @@ fn prepare_inner<'a>(
         if !names.contains(name) {
             continue;
         }
-        let mut lexical_owner = owner(*node);
+        let mut lexical_owner = scopes.owner(index);
         let seed = loop {
             let local = owners
-                .entry(lexical_owner.id())
-                .or_insert_with(|| bindings(lexical_owner, source));
+                .entry(lexical_owner)
+                .or_insert_with(|| scopes.bindings(lexical_owner, &nodes, source));
             if let Some(values) = local.get(name) {
                 break (values.len() == 1)
-                    .then(|| recipes.get(&values[0].id()).copied())
+                    .then(|| recipes.get(&values[0]).copied())
                     .flatten();
             }
-            if lexical_owner.kind() == "program" {
+            if nodes[lexical_owner].kind_id() == kinds.program {
                 break None;
             }
-            lexical_owner = owner(lexical_owner);
+            lexical_owner = scopes.owner(lexical_owner);
         };
         let Some(seed) = seed else {
             continue;
@@ -266,10 +381,13 @@ fn prepare_inner<'a>(
     if replacements.is_empty() {
         return Ok(Prepared {
             source: Cow::Borrowed(source),
-            tree: retain_tree.then(|| tree.clone()),
+            edited: retain_tree.then(|| EditedSyntax {
+                original: tree,
+                edits: Vec::new(),
+            }),
         });
     }
-    let reused = if retain_tree {
+    let edited = if retain_tree {
         let starts: Vec<_> = std::iter::once(0)
             .chain(
                 source
@@ -285,11 +403,10 @@ fn prepare_inner<'a>(
                 column: position - starts[row],
             }
         };
-        let mut edited = tree.clone();
-        // Editing from the end keeps every earlier byte/point in the original
-        // coordinates, including scripts containing multibyte text or CRLF.
+        // Edits are listed from the end so every earlier byte/point keeps the
+        // original coordinates, including scripts with multibyte text or CRLF.
+        let mut edits = Vec::with_capacity(replacements.len());
         for (range, value) in replacements.iter().rev() {
-            crate::cpu::check()?;
             let start_position = point(range.start);
             let mut new_end_position = start_position;
             for byte in value.bytes() {
@@ -300,7 +417,7 @@ fn prepare_inner<'a>(
                     new_end_position.column += 1;
                 }
             }
-            edited.edit(&tree_sitter::InputEdit {
+            edits.push(tree_sitter::InputEdit {
                 start_byte: range.start,
                 old_end_byte: range.end,
                 new_end_byte: range.start + value.len(),
@@ -309,7 +426,10 @@ fn prepare_inner<'a>(
                 new_end_position,
             });
         }
-        Some(edited)
+        Some(EditedSyntax {
+            original: tree,
+            edits,
+        })
     } else {
         None
     };
@@ -329,13 +449,66 @@ fn prepare_inner<'a>(
     )?;
     Ok(Prepared {
         source: Cow::Owned(output),
-        tree: reused,
+        edited,
     })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Manual local profiling of the decode pass on a captured initializer.
+    #[test]
+    #[ignore = "set CF_GATEWAY_PROFILE_SCRIPT to a local captured public initializer"]
+    fn profile_prepare_stages() {
+        let source = std::fs::read_to_string(
+            std::env::var("CF_GATEWAY_PROFILE_SCRIPT").expect("initializer path"),
+        )
+        .unwrap();
+        for round in 0..3 {
+            let mut last = std::time::Instant::now();
+            let mut rows = Vec::new();
+            let mut stage = |name: &str| {
+                rows.push((name.to_string(), last.elapsed().as_secs_f64() * 1000.));
+                last = std::time::Instant::now();
+            };
+            let tree = crate::cpu::parse(&mut parser(), &source).unwrap();
+            stage("parse");
+            let nodes = walk(tree.root_node(), true);
+            stage("walk");
+            let scopes = ScopeMap::new(&nodes).unwrap();
+            stage("scope_map");
+            let kinds = Kinds::get();
+            let owners: std::collections::BTreeSet<_> = (0..nodes.len())
+                .filter(|&i| {
+                    let k = nodes[i].kind_id();
+                    k == kinds.program || kinds.is_function(k)
+                })
+                .collect();
+            let bound: usize = owners
+                .iter()
+                .map(|&o| scopes.bindings(o, &nodes, &source).len())
+                .sum();
+            stage("bindings_all_scopes");
+            let plain = prepare_inner(&source, false, Some(&tree)).unwrap();
+            stage("prepare_without_tree");
+            let prepared = prepare_for_compile_reusing(&source, Some(&tree)).unwrap();
+            stage("prepare_with_lazy_edits");
+            let edited = prepared.tree();
+            stage("apply_edits");
+            let reparsed =
+                crate::cpu::parse_reusing(&mut parser(), prepared.source.as_ref(), edited.as_ref())
+                    .unwrap();
+            stage("incremental_reparse");
+            let full = crate::cpu::parse(&mut parser(), prepared.source.as_ref()).unwrap();
+            stage("full_reparse");
+            assert_eq!(plain.source, prepared.source);
+            assert_eq!(reparsed.root_node().to_sexp(), full.root_node().to_sexp());
+            eprintln!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({"round":round,"nodes":nodes.len(),"scopes":owners.len(),"boundNames":bound,"preparedLen":prepared.source.len(),"stagesMs":rows}))
+                    .unwrap()
+            );
+        }
+    }
     #[test]
     fn shared_original_syntax_survives_literal_rewrites_and_is_reused_by_configuration_reads() {
         let source=format!("var decode={RECIPE};var plain=decode(`LAsLWkoMQQ==`);_cf_chl_opt.TglCI7={{LgdCU7:'en-us',other:[1,2]}};");
@@ -360,7 +533,7 @@ mod tests {
         ] {
             let prepared = prepare_for_compile(&source).unwrap();
             assert_eq!(prepare(&source).unwrap(), prepared.source);
-            let incremental = crate::cpu::parse_reusing(&mut parser(), &prepared.source, prepared.tree.as_ref()).unwrap();
+            let incremental = crate::cpu::parse_reusing(&mut parser(), &prepared.source, prepared.tree().as_ref()).unwrap();
             let complete = crate::cpu::parse(&mut parser(), &prepared.source).unwrap();
             assert!(!incremental.root_node().has_error());
             assert_eq!(incremental.root_node().to_sexp(), complete.root_node().to_sexp());
