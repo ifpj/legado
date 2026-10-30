@@ -6,6 +6,8 @@
 
 验证：`cargo fmt --check` 与 `cargo check` 零警告；`scripts/dev.ps1 test` 为 207 项通过、5 项手动剖析忽略（含 14097 条历史契约对照），JS/CJS 语法、书源契约与正文清理检查通过；仓库内除 `src/` 外不再出现旧文件路径。同日删除 `D:\Documents\Git\legado-archive\cf-gateway-20261030`（旧 Python 实现、nokk、算法实验与诊断记录，约 5.6 GB），本机只剩 `cf` 分支 worktree 一份源码；离线剖析用的脚本捕获保留在忽略的 `.local/evidence/`。
 
+同日第二步整理仓库其余目录：`assets/` 按消费者拆为 `assets/web/`（控制台 `index.html`、`app.css`、`app.js`、`logo.png`，由 `app::web` 内嵌）和 `assets/sources/`（`gateway-source.js` 与三份站点 parser，由 `sites::sources` 拼接）；四份 Node 脚本（书源契约、台湾与通用正文清理、CI 容器冒烟）移入 `tests/node/`，`tests/` 顶层只剩 cargo 自动发现的 Rust 集成测试和 `fixtures/`；删除空的 `examples/`。`include_str!`、脚本内相对路径、`scripts/dev.ps1`、CI 工作流、README 图片与文档命令同步改写，DEVELOPMENT.md 的本机布局表扩成完整仓库布局。工作副本的 17 个 CRLF／混合换行文件按 `.gitattributes` 归一为 LF（索引本就是 LF，无内容差异）。`scripts/dev.ps1 test` 仍为 207 项通过、5 项忽略，Node 语法与三份契约通过。
+
 ## 单一来源的构建标识与发布流程（2026-10-30）
 
 此前版本号靠手工修改 Cargo.toml，修复常常未提升版本；页面另显示程序文件 SHA-256 前 12 位，同一提交在 amd64 与 arm64 上得到不同值，CI 又用 Cargo.toml 版本给镜像打浮动标签。现在 `build.rs` 在编译时记录 `git describe --tags --match cf-v* --long --dirty --always`（容器构建由 CI 经 `CF_GATEWAY_BUILD_VERSION` 传入同一字符串），`version::parse` 合成唯一标识：发布提交为 `0.2.14`，之后每个提交自动为 `0.2.14+<提交数>.g<提交>`，本地未提交修改附加 `.dirty.<程序哈希前 8 位>`；无标签或无 Git 时分别退化为 `+g<提交>`、`+unknown`，不伪造计数。Web 头部、`/v1/status`（`build`、兼容的 `buildId`、`commit`、`dirty`、`binaryHash`）、`cf-gateway --version` 与布局缓存的编译器标识统一使用它；程序哈希降为诊断字段。

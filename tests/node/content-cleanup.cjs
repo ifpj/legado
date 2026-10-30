@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
-const common=fs.readFileSync(path.join(__dirname,'../assets/gateway-source.js'),'utf8');
+const common=fs.readFileSync(path.join(__dirname,'../../assets/sources/gateway-source.js'),'utf8');
 const ctx=vm.createContext({});vm.runInContext(common,ctx);
 const body='痛！\n\n好痛！\n\n他睁开眼睛，看见窗外的晨光照着书页。随后继续了昨天的故事。';
 const cases=[
@@ -56,13 +56,13 @@ assert.equal(ctx.cfCleanChapterText('半夏小说\n\n'+body,'','半夏小说',''
 assert.equal(ctx.cfCleanChapterText('7.5K\n\n'+body,'第1章','',''),'7.5K\n\n'+body,'retain word-count notes');
 for(const line of ['——不如让欧尼谈恋爱试试？','自己的墓为什么不能去看？','“我替他给你道个歉。”'])assert.equal(ctx.cfCleanChapterText(line+'\n\n'+body,'第17章 '+line.replace(/^——|[“”]/g,''),'',''),line+'\n\n'+body,'preserve opening dialogue and questions even if reused as a title');
 assert.equal(ctx.cfCleanChapterText('第431章 解决吞食恶龟，帝具香格里拉\n\n'+body,'第430章 解决吞食恶龟，帝具香格拉','',''),'第431章 解决吞食恶龟，帝具香格里拉\n\n'+body,'near titles require the same chapter number');
-vm.runInContext(fs.readFileSync(path.join(__dirname,'../assets/banxia-parser.js'),'utf8'),ctx);
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../../assets/sources/banxia-parser.js'),'utf8'),ctx);
 assert.equal(ctx.bxCleanContent(body+'\n\n半夏小说，快乐很多'),body+'\n\n');
 assert.equal(ctx.bxCleanContent('甲nbsp;nbsp;。乙'),'甲。乙','entity remnants only; preserve punctuation');
 assert.equal(ctx.bxCleanContent('她说“半夏小说，快乐很多”，随后打开书页。'),'她说“半夏小说，快乐很多”，随后打开书页。','only standalone slogan');
 assert.equal(ctx.bxCleanContent('浏♂览♂器♂搜索\n\n\\（书名\\）.+?\\{♂,,♂\\} 可/以快速找到你在看的/书！\n\n'+body),'\n\n'+body);
 assert.equal(ctx.bxCleanContent(body+'\n\n♂章节前往章节前往♂.+?\\{?/?♂\\}♂输\\入\\网\\址：.{\\ＷＷＷ··}\n\n/♂\n\n半夏小说，快乐很多'),body+'\n\n');
-vm.runInContext(fs.readFileSync(path.join(__dirname,'../assets/69shuba-parser.js'),'utf8'),ctx);
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../../assets/sources/69shuba-parser.js'),'utf8'),ctx);
 ctx.cfDoc=()=>({selectFirst:selector=>selector==='h1'?'第1章 归来':{select:()=>({remove:()=>{}}),html:()=> 'fixture'}});
 ctx.cfText=value=>String(value||'');
 ctx.cfDocument=()=>({wholeText:()=> '　　第1章 归来\n\n\u2003\u2003第一段，保留 内部 空格。\n\n \t\u00a0第二段，继续保留正文。\n\n\u2002\u2004\u2009第三段，继续保持换段。'});

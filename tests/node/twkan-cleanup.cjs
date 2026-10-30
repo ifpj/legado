@@ -1,8 +1,8 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const context=vm.createContext({Packages:{java:{text:{Normalizer:{Form:{NFKD:'NFKD'},normalize:(text,form)=>String(text).normalize(form)}},lang:{Character:{digit:(point)=>{for(const start of [0x30,0x660,0x6f0,0x966,0xe50,0xff10])if(point>=start&&point<start+10)return point-start;return -1;}}}}}});
-vm.runInContext(fs.readFileSync(path.join(__dirname,'../assets/gateway-source.js'),'utf8'),context);
-vm.runInContext(fs.readFileSync(path.join(__dirname,'../assets/twkan-parser.js'),'utf8'),context);
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../../assets/sources/gateway-source.js'),'utf8'),context);
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../../assets/sources/twkan-parser.js'),'utf8'),context);
 const clean=context.cfCleanTwkanContent;
 const ads=[
  '无一错一首一发一内一容一在一一看！',

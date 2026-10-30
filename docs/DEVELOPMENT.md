@@ -14,11 +14,11 @@
 | `syntax/`（constants、compiler、compiler_profiles、literal_strings、static_data、html、css） | 不执行脚本的静态分析：常量恢复、布局编译与结构剖面、有界字符串解码、页面声明与配置读取、HTML/CSS 事实 |
 | `program/`（data、catalog、operands、native_input） | 协议字节码数据：布局与持久化缓存（`data::layout_store`）、响应读取、任务目录与操作数 |
 | `tasks/`（models、model_geometry、surface、locale、semantics、declared、benchmark、raster、math、identity） | 按当轮输入计算已识别任务：环境与几何模型、声明表面、本地化、有限标量语义、声明值、已审核算术模块、软件光栅、数学配方与客户端身份 |
-| `sites/`（embedded、sources） | 已知站点的嵌入式验证声明、搜索表单与 Cookie 约束；动态书源导出，配合 `assets/*-parser.js` |
+| `sites/`（embedded、sources） | 已知站点的嵌入式验证声明、搜索表单与 Cookie 约束；动态书源导出，拼接 `assets/sources/` 下的公共脚本与各站 parser |
 | `cpu.rs`、`version.rs` | 进程级 CPU 名额与协作取消；由 Git 得到的构建标识 |
 | `regression/`（仅测试） | 历史契约对照与需要注入时钟或原生所有权的检查 |
 
-测试与被测代码同目录：`*_tests.rs` 子模块和 `tests.rs` 文件只在 `cfg(test)` 下编译。`tests/` 目录是跨模块的 HTTP、网络、静态常量和书源契约。
+测试与被测代码同目录：`*_tests.rs` 子模块和 `tests.rs` 文件只在 `cfg(test)` 下编译。`tests/*.rs` 是跨模块的 HTTP、模型、静态常量与编解码契约，`tests/node/` 是书源脚本契约、正文清理回归和 CI 容器冒烟，`tests/fixtures/` 是两者共用的向量。
 profiles 是显式声明、公式和不可变协议布局，不是已计算的浏览器指纹或可复用验证凭证。当前软件模型不声称测量了真实浏览器或发生了人工交互。
 
 静态常量分析中的数组、对象采用写时复制，作用域快照共享只读数据，受限的局部写入先取得独立副本；不能让一次求值改变后续求值的作用域。作用域构建只在需要分析绑定时发布快照，候选筛选先检查语法再求值，避免冷进程反复复制大型常量表。主验证脚本的 managedProtocol 与组件的 frameInitialization 均返回 analysisMs 和 compiledLayoutReused，便于区分首次解析与布局复用；这些诊断耗时不参与协议任务计时。
@@ -120,7 +120,12 @@ Windows 测试机只保留一份源码：`services/cf-gateway` 是本仓库 `cf`
 
 | 路径 | 内容 | 是否入库 |
 | --- | --- | --- |
-| `src/ assets/ profiles/ tests/ docs/ scripts/` | 源码、静态资源、协议布局、测试、文档与本机脚本 | 是 |
+| `src/` | Rust 源码，按处理阶段分组（见上文模块表） | 是 |
+| `assets/web/` | Web 控制台：`index.html`、`app.css`、`app.js`、`logo.png`，由 `app::web` 内嵌并提供 | 是 |
+| `assets/sources/` | 阅读书源脚本：`gateway-source.js` 公共逻辑与各站 `*-parser.js`，由 `sites::sources` 拼接导出 | 是 |
+| `profiles/` | 显式声明、公式与协议布局 JSON，编译期内嵌 | 是 |
+| `tests/` | Rust 集成测试 `*.rs`、Node 脚本 `node/*.cjs`、共用向量 `fixtures/` | 是 |
+| `docs/`、`scripts/dev.ps1`、`Dockerfile`、`compose.yaml`、`.github/workflows/` | 文档、本机脚本、容器构建与 CI | 是 |
 | `target/` | 唯一的 cargo 构建缓存；release 启用增量编译 | 否 |
 | `.local/tools/` | CMake、NASM、libclang；原生依赖（BoringSSL、bindgen）的构建工具 | 否 |
 | `.local/bin/` | 19705 服务正在运行的程序、`service.json`、日志 | 否 |
@@ -150,16 +155,16 @@ Cargo.toml 的版本号不要手工修改。`scripts/dev.ps1 release -Version X.
 ```sh
 cargo fmt --check
 cargo test --locked
-for file in assets/*.js tests/*.cjs; do node --check "$file"; done
-node tests/source-contracts.cjs
-node tests/twkan-cleanup.cjs
-node tests/content-cleanup.cjs
+for file in assets/*/*.js tests/node/*.cjs; do node --check "$file"; done
+node tests/node/source-contracts.cjs
+node tests/node/twkan-cleanup.cjs
+node tests/node/content-cleanup.cjs
 docker build -t cf-gateway:test .
 ```
 
 Windows 测试机可用 `scripts/dev.ps1 test` 一次执行除 Docker 外的全部检查，`scripts/dev.ps1 push` 在检查通过后推送 `cf` 分支。
 
-Rust 测试不访问真实网站。tests/smoke-container.cjs 需要先启动容器，CI 使用宿主网络让容器访问临时本地上游；脚本不依赖外网和账号。CI 分别在原生 amd64、arm64 runner 构建、运行测试、验证实际容器，然后合并镜像清单。
+Rust 测试不访问真实网站。tests/node/smoke-container.cjs 需要先启动容器，CI 使用宿主网络让容器访问临时本地上游；脚本不依赖外网和账号。CI 分别在原生 amd64、arm64 runner 构建、运行测试、验证实际容器，然后合并镜像清单。
 
 本机手动测耗时应采用 release 构建，分别记录冷进程/新会话/复用会话。保留全部失败与慢样本；记录墙钟总耗时和服务内部耗时，不能将本地计算时间冒充端到端时间。真实网站验收必须检查目标页面的业务标记；例如 Linux.do 测试地址的真实网站页面可能是 404，不能只以 HTTP 200 判断。
 

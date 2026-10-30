@@ -28,17 +28,17 @@ fn generate(site: &str, base: &str, token: &str) -> Result<(Value, String)> {
         "twkan" => (
             "台湾小说网",
             "https://twkan.com",
-            include_str!("../../assets/twkan-parser.js"),
+            include_str!("../../assets/sources/twkan-parser.js"),
         ),
         "69shuba" => (
             "69书吧",
             "https://www.69shuba.com",
-            include_str!("../../assets/69shuba-parser.js"),
+            include_str!("../../assets/sources/69shuba-parser.js"),
         ),
         "banxia" => (
             "半夏小说",
             "https://www.xbanxia.cc",
-            include_str!("../../assets/banxia-parser.js"),
+            include_str!("../../assets/sources/banxia-parser.js"),
         ),
         _ => {
             let mut e = Error::new("INVALID_SITE", "未知接入示例");
@@ -61,7 +61,7 @@ fn generate(site: &str, base: &str, token: &str) -> Result<(Value, String)> {
     ] {
         output.push_str(&format!("var {key} = {};\n", serde_json::to_string(value)?));
     }
-    output.push_str(include_str!("../../assets/gateway-source.js"));
+    output.push_str(include_str!("../../assets/sources/gateway-source.js"));
     output.push_str(parser);
     Ok((config, output))
 }

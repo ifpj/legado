@@ -100,13 +100,13 @@ function Invoke-Test {
     Invoke-Step 'cargo fmt --check' { cargo fmt --check }
     Invoke-Step 'cargo test --locked' { cargo test --locked }
     Invoke-Step 'node --check' {
-        foreach ($file in @(Get-ChildItem (Join-Path $root 'assets') -Filter *.js) + @(Get-ChildItem (Join-Path $root 'tests') -Filter *.cjs)) {
+        foreach ($file in @(Get-ChildItem (Join-Path $root 'assets') -Recurse -Filter *.js) + @(Get-ChildItem (Join-Path $root 'tests\node') -Filter *.cjs)) {
             node --check $file.FullName
             if ($LASTEXITCODE) { throw "node --check failed: $($file.Name)" }
         }
     }
     foreach ($contract in 'source-contracts', 'twkan-cleanup', 'content-cleanup') {
-        Invoke-Step "node tests/$contract.cjs" { node (Join-Path $root "tests\$contract.cjs") }
+        Invoke-Step "node tests/node/$contract.cjs" { node (Join-Path $root "tests\node\$contract.cjs") }
     }
 }
 

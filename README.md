@@ -4,7 +4,7 @@
 
 服务运行时不启动 Python、Node、浏览器或 nokk。Web 和阅读示例中的 JavaScript 用于界面与 HTML 解析；服务端采用静态协议解析及有限计算模型，不执行网站 JavaScript。
 
-![CF Gateway](assets/logo.png)
+![CF Gateway](assets/web/logo.png)
 
 ## 启动
 

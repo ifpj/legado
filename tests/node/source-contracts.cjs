@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
-const script=fs.readFileSync(path.join(__dirname,'../assets/gateway-source.js'),'utf8');
+const script=fs.readFileSync(path.join(__dirname,'../../assets/sources/gateway-source.js'),'utf8');
 // Existing source variables survive an import; upgrade only the legacy Taiwan
 // prefix, preserving the per-client suffix and discovery pagination metadata.
 const legacy='legado-relay-1700000000000-ab12cd34ef56';

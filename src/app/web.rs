@@ -74,7 +74,7 @@ fn send_bytes(status: StatusCode, body: Vec<u8>, kind: &str) -> Response {
 async fn index() -> Response {
     let mut response = send(
         StatusCode::OK,
-        include_str!("../../assets/index.html").replace("{{BUILD}}", crate::version::build()),
+        include_str!("../../assets/web/index.html").replace("{{BUILD}}", crate::version::build()),
         "text/html; charset=utf-8",
     );
     response.headers_mut().insert("content-security-policy","default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'".parse().unwrap());
@@ -83,19 +83,19 @@ async fn index() -> Response {
 async fn css() -> Response {
     send(
         StatusCode::OK,
-        include_str!("../../assets/app.css").into(),
+        include_str!("../../assets/web/app.css").into(),
         "text/css; charset=utf-8",
     )
 }
 async fn js() -> Response {
     send(
         StatusCode::OK,
-        include_str!("../../assets/app.js").into(),
+        include_str!("../../assets/web/app.js").into(),
         "application/javascript; charset=utf-8",
     )
 }
 async fn logo() -> Response {
-    let mut response = include_bytes!("../../assets/logo.png")
+    let mut response = include_bytes!("../../assets/web/logo.png")
         .as_slice()
         .into_response();
     response
