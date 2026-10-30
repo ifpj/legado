@@ -1,4 +1,4 @@
-use cf_gateway::constants::{walk, Constant, Tables};
+use cf_gateway::syntax::constants::{walk, Constant, Tables};
 use serde_json::Value;
 fn parse(source: &str) -> tree_sitter::Tree {
     let mut p = tree_sitter::Parser::new();

@@ -1,14 +1,20 @@
-use cf_gateway::{css, http_tasks, native_input, network::USER_AGENT, raster, static_data, web};
+use cf_gateway::{
+    app::web, network::USER_AGENT, program::native_input, protocol::http_tasks, syntax::css,
+    syntax::static_data, tasks::raster,
+};
 use serde_json::{json, Value};
 #[test]
 fn numeric_wire_strings_use_shortest_even_rounding() {
     assert_eq!(
-        cf_gateway::math::number(1125899906842616.25),
+        cf_gateway::tasks::math::number(1125899906842616.25),
         "1125899906842616.2"
     );
-    assert_eq!(cf_gateway::math::number(1e-6), "0.000001");
-    assert_eq!(cf_gateway::math::number(-0.0), "0");
-    assert_eq!(cf_gateway::math::number(1e20), "100000000000000000000");
+    assert_eq!(cf_gateway::tasks::math::number(1e-6), "0.000001");
+    assert_eq!(cf_gateway::tasks::math::number(-0.0), "0");
+    assert_eq!(
+        cf_gateway::tasks::math::number(1e20),
+        "100000000000000000000"
+    );
 }
 #[test]
 fn css_independent_vectors() {

@@ -4,7 +4,7 @@
 
 ## 文件
 
-sources.rs 验证服务地址并输出 config、站点标识、服务地址、服务令牌，再拼接 gateway-source.js 与站点 parser。/sources.json 返回三份完整书源对象的 JSON 数组，各自 mainJs 包含同一套动态脚本；Web 的导入、复制和下载均使用此批量接口，在阅读的同一个窗口选择或更新。/source.js 保留单份脚本兼容入口，不维护另一套生成后的书源文件。
+`sites/sources.rs` 验证服务地址并输出 config、站点标识、服务地址、服务令牌，再拼接 gateway-source.js 与站点 parser。/sources.json 返回三份完整书源对象的 JSON 数组，各自 mainJs 包含同一套动态脚本；Web 的导入、复制和下载均使用此批量接口，在阅读的同一个窗口选择或更新。/source.js 保留单份脚本兼容入口，不维护另一套生成后的书源文件。
 
 gateway-source.js 包含请求、会话、同站 URL 解析、简繁转换辅助和从网页提取发现分类的逻辑。每个 parser 提供：
 

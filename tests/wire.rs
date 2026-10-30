@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use cf_gateway::{
-    data::{program, Format},
-    wire::Cipher,
+    program::data::{program, Format},
+    protocol::wire::Cipher,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};

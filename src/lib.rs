@@ -1,43 +1,20 @@
 #![recursion_limit = "512"]
-pub mod benchmark;
-pub mod catalog;
-pub mod compiler;
-pub mod compiler_profiles;
-pub mod completion;
-pub mod constants;
+//! Crate map. Each group is one stage of turning a site response into a
+//! page: `app` serves HTTP, `network` talks to the site, `protocol` runs the
+//! challenge flow, `syntax` reads the initializer without executing it,
+//! `program` decodes the protocol bytecode, `tasks` computes the finite task
+//! models, `sites` holds per-site adapters and book sources.
+pub mod app;
 mod cpu;
-pub mod css;
-pub mod data;
-pub mod declared;
-pub mod embedded;
-pub mod engine;
-pub mod html;
-pub mod http_tasks;
-pub mod identity;
-pub mod jsd;
-pub mod literal_strings;
-pub mod locale;
-pub mod math;
-pub mod model_geometry;
-pub mod models;
-pub mod native_input;
 pub mod network;
-pub mod operands;
-pub mod raster;
-pub mod semantics;
-pub mod service;
-pub mod sources;
-pub mod static_data;
-pub mod surface;
+pub mod program;
+pub mod protocol;
+#[cfg(test)]
+mod regression;
+pub mod sites;
+pub mod syntax;
+pub mod tasks;
 pub mod version;
-pub mod web;
-pub mod wire;
-
-#[cfg(test)]
-mod migration_tests;
-#[cfg(test)]
-mod native_regression;
-
 use serde_json::{json, Value};
 use std::{
     fmt,

@@ -1,5 +1,11 @@
 # 迁移与验收记录
 
+## 源码按处理阶段分组（2026-10-30）
+
+此前 `src/` 顶层平铺 30 余个文件，服务、协议、语法分析与任务模型混在一起，测试子模块与被测代码也不在一处。现在 `src/lib.rs` 只做总图，文件按阶段分为 `app/`（web、service）、`network/`、`protocol/`（engine、wire 含原生内核、completion、http_tasks、jsd）、`syntax/`（constants、compiler、compiler_profiles、literal_strings、static_data、html、css）、`program/`（data 含 layout_store、catalog、operands、native_input）、`tasks/`（models、model_geometry、surface、locale、semantics、declared、benchmark、raster、math、identity）、`sites/`（embedded、sources）；`cpu.rs`、`version.rs` 留在根；两份 crate 级回归（原 `migration_tests.rs`、`native_regression.rs`）归入仅测试编译的 `regression/`。全部通过 `git mv` 迁移以保留历史，`crate::` 路径、`#[path]` 与 `include_str!` 深度同步改写，未改任何函数体。docs/DEVELOPMENT.md 的模块表改为按目录说明。
+
+验证：`cargo fmt --check` 与 `cargo check` 零警告；`scripts/dev.ps1 test` 为 207 项通过、5 项手动剖析忽略（含 14097 条历史契约对照），JS/CJS 语法、书源契约与正文清理检查通过；仓库内除 `src/` 外不再出现旧文件路径。同日删除 `D:\Documents\Git\legado-archive\cf-gateway-20261030`（旧 Python 实现、nokk、算法实验与诊断记录，约 5.6 GB），本机只剩 `cf` 分支 worktree 一份源码；离线剖析用的脚本捕获保留在忽略的 `.local/evidence/`。
+
 ## 单一来源的构建标识与发布流程（2026-10-30）
 
 此前版本号靠手工修改 Cargo.toml，修复常常未提升版本；页面另显示程序文件 SHA-256 前 12 位，同一提交在 amd64 与 arm64 上得到不同值，CI 又用 Cargo.toml 版本给镜像打浮动标签。现在 `build.rs` 在编译时记录 `git describe --tags --match cf-v* --long --dirty --always`（容器构建由 CI 经 `CF_GATEWAY_BUILD_VERSION` 传入同一字符串），`version::parse` 合成唯一标识：发布提交为 `0.2.14`，之后每个提交自动为 `0.2.14+<提交数>.g<提交>`，本地未提交修改附加 `.dirty.<程序哈希前 8 位>`；无标签或无 Git 时分别退化为 `+g<提交>`、`+unknown`，不伪造计数。Web 头部、`/v1/status`（`build`、兼容的 `buildId`、`commit`、`dirty`、`binaryHash`）、`cf-gateway --version` 与布局缓存的编译器标识统一使用它；程序哈希降为诊断字段。

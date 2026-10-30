@@ -7,10 +7,10 @@ use axum::{
     Router,
 };
 use cf_gateway::{
-    engine::Engine,
+    app::service::Service,
+    app::web,
     network::{Dns, Session},
-    service::Service,
-    web,
+    protocol::engine::Engine,
 };
 use flate2::{write::GzEncoder, Compression};
 use futures_util::future::join_all;
@@ -909,7 +909,7 @@ async fn request_validation_is_local_and_statistics_are_bounded() {
 }
 #[tokio::test]
 async fn integrity_is_one_cookie_free_get_and_preserves_deadline_failures() {
-    use cf_gateway::http_tasks::{self, Task};
+    use cf_gateway::protocol::http_tasks::{self, Task};
     let (server, c) = fixture().await;
     let s = Arc::new(session());
     s.cookies.add("login=must-not-send; Path=/", &server.url);

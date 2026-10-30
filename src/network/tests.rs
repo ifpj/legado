@@ -234,7 +234,8 @@ async fn mapping_overrides_explicit_port_preserves_host_cookie_and_original_sess
 async fn mapping_does_not_create_a_new_logical_service_session() {
     let a = page("A").await;
     let b = page("B").await;
-    let service = crate::service::Service::new(crate::engine::Engine::default()).unwrap();
+    let service =
+        crate::app::service::Service::new(crate::protocol::engine::Engine::default()).unwrap();
     for server in [&a, &b] {
         let result=service.fetch(json!({"url":"http://localhost:1/chapter","session":"same-reader","connectTo":{"localhost:1":server.url.trim_start_matches("http://")}}),false,false).await.unwrap();
         assert_eq!(result["status"], 200);
@@ -608,7 +609,8 @@ async fn request_network_overrides_are_ephemeral_and_keep_existing_session_keys(
     let doh = doh_server(false, calls.clone()).await;
     let target = page("request").await;
     let port = url::Url::parse(&target.url).unwrap().port().unwrap();
-    let service = crate::service::Service::new(crate::engine::Engine::default()).unwrap();
+    let service =
+        crate::app::service::Service::new(crate::protocol::engine::Engine::default()).unwrap();
     let url = format!("http://unresolvable.invalid:{port}/");
     let first=service.fetch(json!({"url":url,"session":"same","network":{"doh":{"enabled":true,"url":format!("{}/dns-query",doh.url)}}}),false,false).await.unwrap();
     assert_eq!(first["status"], 200);
@@ -648,7 +650,8 @@ async fn nested_proxy_doh_and_mapping_use_the_selected_proxy_and_exclude_infrast
         let doh = doh_server(false, calls.clone()).await;
         let target = page("nested").await;
         let port = url::Url::parse(&target.url).unwrap().port().unwrap();
-        let service = crate::service::Service::new(crate::engine::Engine::default()).unwrap();
+        let service =
+            crate::app::service::Service::new(crate::protocol::engine::Engine::default()).unwrap();
         let url = format!("http://unresolvable.invalid:{port}/");
         let result=service.fetch(json!({"url":url,"session":"nested","network":{"proxy":proxy.url,"doh":{"enabled":true,"url":doh.url}}}),false,false).await.unwrap();
         assert_eq!(result["status"], 200);
@@ -667,9 +670,11 @@ async fn nested_proxy_doh_and_mapping_use_the_selected_proxy_and_exclude_infrast
             doh: true,
             doh_url: doh.url.clone(),
         };
-        let service =
-            crate::service::Service::with_network(crate::engine::Engine::default(), global)
-                .unwrap();
+        let service = crate::app::service::Service::with_network(
+            crate::protocol::engine::Engine::default(),
+            global,
+        )
+        .unwrap();
         assert!(service
             .fetch(
                 json!({"url":target.url,"network":{"proxy":null,"doh":{"enabled":false}}}),
@@ -689,7 +694,8 @@ async fn legacy_proxy_still_works_and_history_never_contains_proxy_credentials()
     let (proxy, _) = proxy_fixture(false).await;
     let target = page("legacy").await;
     let port = url::Url::parse(&target.url).unwrap().port().unwrap();
-    let service = crate::service::Service::new(crate::engine::Engine::default()).unwrap();
+    let service =
+        crate::app::service::Service::new(crate::protocol::engine::Engine::default()).unwrap();
     let auth = proxy
         .url
         .replacen("http://", "http://private-user:private-pass@", 1);

@@ -507,7 +507,7 @@ mod tests {
                 p.group(deadline(), move |index, workers| {
                     assert_eq!(workers, count);
                     observed.fetch_add(1, Ordering::SeqCst);
-                    crate::wire::work(
+                    crate::protocol::wire::work(
                         "bbbbbbbbbbbbbbbb|1792490000123|0|",
                         "suffix",
                         1000,
@@ -549,7 +549,7 @@ mod tests {
             deadline: Instant::now(),
         };
         let result = controlled(control, || {
-            crate::compiler::compile("function f(){return 1}", false)
+            crate::syntax::compiler::compile("function f(){return 1}", false)
         });
         assert_eq!(result.err().unwrap().code, "TIMEOUT");
         assert!(!stopped());
@@ -566,9 +566,9 @@ mod tests {
                 p.run(deadline(), move || {
                     let _ = started.send(());
                     match parser {
-                        0 => crate::static_data::assignment(&source, "_cf_chl_opt"),
-                        1 => crate::static_data::object_data(&source, "_cf_chl_opt"),
-                        _ => crate::jsd::inspect(&source).map(Some),
+                        0 => crate::syntax::static_data::assignment(&source, "_cf_chl_opt"),
+                        1 => crate::syntax::static_data::object_data(&source, "_cf_chl_opt"),
+                        _ => crate::protocol::jsd::inspect(&source).map(Some),
                     }
                 })
                 .await
@@ -588,7 +588,7 @@ mod tests {
     #[tokio::test]
     async fn protocol_decode_and_literal_scan_leave_async_runtime_responsive_and_cancel() {
         use base64::Engine as _;
-        let format: crate::data::Format = serde_json::from_value(serde_json::json!({
+        let format: crate::program::data::Format = serde_json::from_value(serde_json::json!({
             "byte_offset":0,"initial_key":0,"state_step":1,"state_multiplier":17,
             "state_increment":3,"hash_salt":0,"char_xor":0,"state_quadratic":0,"char_mode":"before-subtract"
         })).unwrap();
@@ -602,7 +602,7 @@ mod tests {
                     512 * 1024
                 }
             ]);
-            let plan = crate::data::Plan {
+            let plan = crate::program::data::Plan {
                 format: format.clone(),
                 meta: serde_json::json!({"key_material":{"literal_tag":255,"literal_kind_slot":1}}),
                 alphabet: String::new(),
@@ -616,9 +616,9 @@ mod tests {
                     let _ = started.send(());
                     loop {
                         if decode {
-                            crate::wire::flow(&encoded, "0123456789abcdef")?;
+                            crate::protocol::wire::flow(&encoded, "0123456789abcdef")?;
                         } else {
-                            crate::data::Response::read(&encoded, &plan, true)?;
+                            crate::program::data::Response::read(&encoded, &plan, true)?;
                         }
                     }
                     #[allow(unreachable_code)]

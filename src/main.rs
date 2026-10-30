@@ -93,7 +93,7 @@ fn configure_layout_cache(option: Option<String>) -> serde_json::Value {
         Some("") | Some("none") | Some("off") => None,
         Some(path) => Some(PathBuf::from(path)),
     };
-    cf_gateway::data::layout_store::configure(dir)
+    cf_gateway::program::data::layout_store::configure(dir)
 }
 async fn execute() -> Result<()> {
     let args = Args::parse();
@@ -109,11 +109,11 @@ async fn execute() -> Result<()> {
     }) {
         Command::Css { input, output } => {
             let html = std::fs::read_to_string(input)?;
-            let f = cf_gateway::html::Facts::read(&html)?;
+            let f = cf_gateway::syntax::html::Facts::read(&html)?;
             let sheets = f
                 .style_texts
                 .iter()
-                .map(|s| cf_gateway::css::stylesheet(s))
+                .map(|s| cf_gateway::syntax::css::stylesheet(s))
                 .collect::<Result<Vec<_>>>()?;
             std::fs::write(output, serde_json::to_vec_pretty(&sheets)?)?;
             Ok(())
@@ -129,9 +129,9 @@ async fn execute() -> Result<()> {
                 "{}",
                 serde_json::json!({"layoutCache":configure_layout_cache(layout_cache_dir)})
             );
-            cf_gateway::web::serve(
-                cf_gateway::service::Service::with_network(
-                    cf_gateway::engine::Engine { capture_dir },
+            cf_gateway::app::web::serve(
+                cf_gateway::app::service::Service::with_network(
+                    cf_gateway::protocol::engine::Engine { capture_dir },
                     network.clone(),
                 )?,
                 &host,
@@ -148,7 +148,7 @@ async fn execute() -> Result<()> {
             layout_cache_dir,
         } => {
             configure_layout_cache(layout_cache_dir);
-            let engine = cf_gateway::engine::Engine { capture_dir };
+            let engine = cf_gateway::protocol::engine::Engine { capture_dir };
             let session = std::sync::Arc::new(cf_gateway::network::Session::new(
                 cf_gateway::network::Dns::new(&network)?,
                 network.proxy.clone(),
@@ -186,7 +186,8 @@ async fn execute() -> Result<()> {
             frame,
             output,
         } => {
-            let p = cf_gateway::compiler::compile(&std::fs::read_to_string(script)?, frame)?;
+            let p =
+                cf_gateway::syntax::compiler::compile(&std::fs::read_to_string(script)?, frame)?;
             std::fs::write(output, serde_json::to_vec_pretty(&p.meta)?)?;
             Ok(())
         }
@@ -199,11 +200,15 @@ async fn execute() -> Result<()> {
             parent_html,
         } => {
             let script = std::fs::read_to_string(script)?;
-            let plan = cf_gateway::data::Plan::analyze(&script, frame)?;
+            let plan = cf_gateway::program::data::Plan::analyze(&script, frame)?;
             let encoded = std::fs::read_to_string(program)?;
-            let mut response = cf_gateway::data::Response::read(encoded.trim(), &plan, false)?;
+            let mut response =
+                cf_gateway::program::data::Response::read(encoded.trim(), &plan, false)?;
             let catalog = if frame {
-                Some(cf_gateway::catalog::Catalog::read(&mut response, &plan)?)
+                Some(cf_gateway::program::catalog::Catalog::read(
+                    &mut response,
+                    &plan,
+                )?)
             } else {
                 None
             };
@@ -215,7 +220,7 @@ async fn execute() -> Result<()> {
                 } else {
                     String::new()
                 };
-                let context = cf_gateway::models::Context {
+                let context = cf_gateway::tasks::models::Context {
                     response: &response,
                     plan: &plan,
                     catalog,
@@ -225,7 +230,7 @@ async fn execute() -> Result<()> {
                     page_url: "https://twkan.com/",
                     mode: "managed",
                 };
-                let result = cf_gateway::engine::calculate_all(&context)?;
+                let result = cf_gateway::protocol::engine::calculate_all(&context)?;
                 computed = serde_json::json!({"fields":result.fields,"kinds":result.kinds,"count":result.fields.len()});
             }
             let value = serde_json::json!({"program":response.program,"literals":response.literals,"packed":response.packed,"catalog":catalog,"computed":computed});
