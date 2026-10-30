@@ -1,5 +1,12 @@
 # 迁移与验收记录
 
+## 单一来源的构建标识与发布流程（2026-10-30）
+
+此前版本号靠手工修改 Cargo.toml，修复常常未提升版本；页面另显示程序文件 SHA-256 前 12 位，同一提交在 amd64 与 arm64 上得到不同值，CI 又用 Cargo.toml 版本给镜像打浮动标签。现在 `build.rs` 在编译时记录 `git describe --tags --match cf-v* --long --dirty --always`（容器构建由 CI 经 `CF_GATEWAY_BUILD_VERSION` 传入同一字符串），`version::parse` 合成唯一标识：发布提交为 `0.2.14`，之后每个提交自动为 `0.2.14+<提交数>.g<提交>`，本地未提交修改附加 `.dirty.<程序哈希前 8 位>`；无标签或无 Git 时分别退化为 `+g<提交>`、`+unknown`，不伪造计数。Web 头部、`/v1/status`（`build`、兼容的 `buildId`、`commit`、`dirty`、`binaryHash`）、`cf-gateway --version` 与布局缓存的编译器标识统一使用它；程序哈希降为诊断字段。
+
+发布只经 `scripts/dev.ps1 release -Version X.Y.Z`：要求 `cf` 干净且等于 origin/cf，更新 Cargo.toml 与 Cargo.lock，跑完整检查，提交、打附注标签 `cf-vX.Y.Z` 并推送分支与标签。CI 对分支与标签都构建，`fetch-depth: 0` 后重新 `describe`，Cargo.toml 版本与最近标签不一致即失败；距离 0 发布 `:X.Y.Z`，否则 `:X.Y.Z-<提交数>-g<提交>`，`:latest` 与 `:sha-<提交>` 照旧。起点标签 `cf-v0.2.14` 指向 0.2.14 的发布提交 8a5bd88f0。
+
+验证：`version` 模块 4 项解析测试覆盖发布提交、后续提交、手工改版未打标签、脏构建、无标签、无 Git 与阅读 App 标签误匹配；HTTP 契约与容器冒烟改为检查 `build`、`dirty` 与 `binaryHash`，`cargo test --locked` 为 207 项通过、5 项手动剖析忽略；工作流 YAML 与标签推导脚本本地解析并以四种 describe 形式验证；Dockerfile 新增 `build.rs` 与构建参数，`.dockerignore` 同步。本机脏构建显示 `0.2.14+3.g79a09af99.dirty.d13e0cbe`，提交后为 `0.2.14+4.g<本提交>`，原位更新 19705 后 `/v1/status` 与页面一致。
 ## 父初始化程序复用路径的解码开销（2026-10-30）
 
 持久化布局后，热进程每个新会话仍为父初始化程序付出：解析约 230 ms、编码字面量解码约 285 ms、早期密钥读取约 230 ms（并行），本机 CPU 合计约 735 ms，2 核设备按比例放大。剖析（`profile_prepare_stages`）显示解码的 3 ms 之外几乎都是遍历与索引：完整遍历 65 ms、作用域 HashMap 40 ms、467 个作用域各自浅遍历约 85 ms、3734 处替换的树编辑约 60 ms，而复用路径根本不使用编辑后的树。

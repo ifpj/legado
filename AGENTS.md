@@ -15,4 +15,6 @@ This orphan branch contains only the Rust service. Read README.md and docs/DEVEL
 - Source exports are generated from embedded assets. Do not commit redundant generated sources, captures, user tokens or private proxy settings.
 - Keep 69shuba's embedded adapter scoped to its verified render/form/cookie flow. A 200 verification page is not a search result; preserve the site's search-rate errors and actual pagination boundaries.
 - Run cargo fmt --check, cargo test --locked and JavaScript syntax checks. Docker changes require both architectures and actual-container smoke tests.
+
+- The build identity (`version::build()`, e.g. `0.2.14+3.g79a09af99`) comes from `git describe` at compile time; cite it in acceptance records. Never edit the Cargo.toml version by hand: `scripts/dev.ps1 release -Version X.Y.Z` bumps it, tags `cf-vX.Y.Z` and pushes, and CI refuses a Cargo.toml version that has no matching tag.
 - Report failures and slow samples honestly. Do not claim universal support or a permanent latency guarantee from a finite live sample.

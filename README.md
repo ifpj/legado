@@ -23,7 +23,7 @@ docker run -d --name cf-gateway --restart unless-stopped \
 
 Web 会自动适配暗色模式。接入示例页使用当前访问地址的域名、端口和 HTTPS，支持手动修改。反向代理应将同一路径前缀下的静态资源和 API 一并转发；公开地址以 Web 中填写的地址为准。
 
-左上角固定显示版本号和构建标识。构建标识取当前运行文件 SHA-256 的前 12 位，可区分包含未提交修改的本地构建；无需 Git 或额外运行工具。`/v1/status` 同样返回 `version` 与 `buildId`。修改源码后需重新构建并启动新程序，页面显示的是实际运行版本。
+左上角固定显示构建标识，`/v1/status` 返回同样的 `build`（兼容字段 `buildId`）以及 `version`、`commit`、`dirty` 和 `binaryHash`。标识在编译时取自 Git：发布提交上就是版本号（`0.2.14`），之后每个提交自动成为 `0.2.14+3.g79a09af99`（自上个发布以来的提交数和提交），含未提交修改的本地构建再加 `.dirty.<程序哈希>`。同一提交在 amd64 与 arm64 上得到相同标识，不需要手工改动任何数字。版本号只通过 `scripts/dev.ps1 release -Version X.Y.Z` 变更：它更新 Cargo.toml、提交、打 `cf-vX.Y.Z` 标签并推送。CI 只在带标签的提交上发布 `:X.Y.Z` 镜像；每次推送都发布 `:latest`、`:<版本>-<提交数>-g<提交>` 与 `:sha-<提交>`，Cargo.toml 版本与标签不一致时发布失败。修改源码后需重新构建并启动新程序，页面显示的是实际运行版本。
 
 不提供定时健康检测。容器采用 gcr.io/distroless/static:nonroot，应用全静态链接，只携带可执行文件和许可声明，不含 shell 或 ICU 动态库。语言格式化使用 ICU4X 与内嵌 Unicode 数据。
 

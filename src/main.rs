@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser)]
+#[command(version = cf_gateway::version::build())]
 struct Args {
     #[arg(
         long,

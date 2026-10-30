@@ -3,6 +3,7 @@ name: CF Gateway Docker
 on:
   push:
     branches: [cf]
+    tags: ['cf-v*']
   workflow_dispatch:
 
 permissions:
@@ -14,7 +15,7 @@ concurrency:
 
 jobs:
   build:
-    if: github.ref == 'refs/heads/cf'
+    if: github.ref == 'refs/heads/cf' || startsWith(github.ref, 'refs/tags/cf-v')
     name: Build and verify linux/${{ matrix.arch }}
     strategy:
       fail-fast: false
@@ -31,6 +32,10 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Build identity
+        run: echo "BUILD_VERSION=$(git describe --tags --match 'cf-v*' --long --always --abbrev=9)" >> "$GITHUB_ENV"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
@@ -51,6 +56,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           load: true
           tags: cf-gateway:test
+          build-args: CF_GATEWAY_BUILD_VERSION=${{ env.BUILD_VERSION }}
           provenance: false
           cache-from: type=gha,scope=cf-gateway-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=cf-gateway-${{ matrix.arch }}
@@ -77,6 +83,7 @@ jobs:
           context: .
           file: Dockerfile
           platforms: linux/${{ matrix.arch }}
+          build-args: CF_GATEWAY_BUILD_VERSION=${{ env.BUILD_VERSION }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -108,13 +115,28 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Image name and version
+        with:
+          fetch-depth: 0
+      - name: Image name and version tags
         run: |
           echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cf-gateway" >> "$GITHUB_ENV"
-          python3 - <<'PY' >> "$GITHUB_ENV"
-          import tomllib
+          describe="$(git describe --tags --match 'cf-v*' --long --always --abbrev=9)"
+          python3 - "$describe" <<'PY' >> "$GITHUB_ENV"
+          import re, sys, tomllib
+          describe = sys.argv[1]
           with open('Cargo.toml', 'rb') as f:
-              print('VERSION=' + tomllib.load(f)['package']['version'])
+              version = tomllib.load(f)['package']['version']
+          match = re.fullmatch(r'cf-v(.+)-(\d+)-g([0-9a-f]+)', describe)
+          if match is None:
+              # No release tag reachable yet: identify the commit only.
+              tags = [f'{version}-g{describe}']
+          else:
+              tag_version, distance, commit = match.group(1), int(match.group(2)), match.group(3)
+              if tag_version != version:
+                  sys.exit(f'Cargo.toml says {version} but the last release tag is cf-v{tag_version}; '
+                           'versions change only through scripts/dev.ps1 release')
+              tags = [version] if distance == 0 else [f'{version}-{distance}-g{commit}']
+          print('BUILD_TAGS=' + ' '.join(tags))
           PY
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -134,8 +156,9 @@ jobs:
           test "${#digests[@]}" = 2
           images=()
           for digest in "${digests[@]}"; do images+=("$IMAGE@sha256:$digest"); done
-          docker buildx imagetools create --tag "$IMAGE:latest" --tag "$IMAGE:$VERSION" \
-            --tag "$IMAGE:sha-$GITHUB_SHA" "${images[@]}"
+          tags=(--tag "$IMAGE:latest" --tag "$IMAGE:sha-$GITHUB_SHA")
+          for tag in $BUILD_TAGS; do tags+=(--tag "$IMAGE:$tag"); done
+          docker buildx imagetools create "${tags[@]}" "${images[@]}"
           docker buildx imagetools inspect "$IMAGE:sha-$GITHUB_SHA" --raw > manifest.json
           python3 - <<'PY'
           import json
@@ -145,4 +168,4 @@ jobs:
           assert {('linux', 'amd64'), ('linux', 'arm64')} <= platforms, platforms
           print('Verified manifest: linux/amd64 and linux/arm64')
           PY
-          printf '### Docker image\n\n`%s:latest`\n\nPlatforms: `linux/amd64`, `linux/arm64`\n' "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          printf '### Docker image\n\n`%s:latest`, tags: %s\n\nPlatforms: `linux/amd64`, `linux/arm64`\n' "$IMAGE" "$BUILD_TAGS" >> "$GITHUB_STEP_SUMMARY"

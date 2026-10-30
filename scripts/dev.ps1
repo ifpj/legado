@@ -19,20 +19,24 @@ Commands:
   stop    stop the service listening on the port
   status  print /v1/status
   push    test, then git push origin cf (requires a clean tree on branch cf)
+  release bump Cargo.toml to -Version, run test, commit, tag cf-v<version>, push branch and tag
 
 Examples:
   scripts/dev.ps1 test
   scripts/dev.ps1 run
   scripts/dev.ps1 push
+  scripts/dev.ps1 release -Version 0.2.15
 #>
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('setup', 'build', 'test', 'run', 'stop', 'status', 'push')]
+    [ValidateSet('setup', 'build', 'test', 'run', 'stop', 'status', 'push', 'release')]
     [string]$Command = 'test',
     [int]$Port = 19705,
     [string]$Listen = '127.0.0.1',
     # Compiled-layout cache directory passed to serve; "none" disables it.
-    [string]$LayoutCacheDir = ''
+    [string]$LayoutCacheDir = '',
+    # Version for `release`, e.g. 0.2.15; bumps Cargo.toml, commits, tags cf-v<version> and pushes.
+    [string]$Version = ''
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -86,8 +90,8 @@ function Invoke-Build {
     Use-BuildEnvironment
     Invoke-Step 'cargo build --release' { cargo build --release --locked --bin cf-gateway }
     $built = Join-Path $root 'target\release\cf-gateway.exe'
-    $hash = (Get-FileHash -LiteralPath $built -Algorithm SHA256).Hash.Substring(0, 12).ToLowerInvariant()
-    Write-Host "binary $built buildId $hash"
+    $identity = (& $built --version) -replace '^cf-gateway ', ''
+    Write-Host "binary $built build $identity"
     return $built
 }
 
@@ -145,9 +149,37 @@ function Start-Gateway([string]$Binary) {
         try { $status = Get-Status } catch { $status = $null }
     } while (-not $status -and (Get-Date) -lt $deadline -and -not $process.HasExited)
     if (-not $status) { throw "Service did not answer /v1/status within 30s; see $binDir\cf-gateway.err.log" }
-    @{ pid = $process.Id; port = $Port; listen = $Listen; executable = $serviceExe; version = $status.version; buildId = $status.buildId; startedAt = (Get-Date).ToString('s') } |
+    @{ pid = $process.Id; port = $Port; listen = $Listen; executable = $serviceExe; version = $status.version; build = $status.build; commit = $status.commit; dirty = $status.dirty; binaryHash = $status.binaryHash; startedAt = (Get-Date).ToString('s') } |
         ConvertTo-Json | Set-Content -LiteralPath $pidFile -Encoding utf8
-    Write-Host "cf-gateway $($status.version) build $($status.buildId) pid $($process.Id) listening on ${Listen}:$Port"
+    Write-Host "cf-gateway $($status.build) pid $($process.Id) listening on ${Listen}:$Port"
+}
+
+function Invoke-Release([string]$Target) {
+    if ($Target -notmatch '^\d+\.\d+\.\d+$') { throw "Release version must look like 0.2.15 (got '$Target')." }
+    Push-Location $root
+    try {
+        if ((git branch --show-current) -ne 'cf') { throw 'Release only from branch cf.' }
+        if (git status --porcelain) { throw 'Commit or stash local changes before releasing.' }
+        $tag = "cf-v$Target"
+        if (git tag --list $tag) { throw "Tag $tag already exists." }
+        git fetch origin cf --tags --quiet
+        if ((git rev-parse HEAD) -ne (git rev-parse origin/cf)) { throw 'Local cf must match origin/cf before a release; push or pull first.' }
+        $manifest = Get-Content -LiteralPath 'Cargo.toml' -Raw
+        $current = [regex]::Match($manifest, '(?m)^version = "([^"]+)"').Groups[1].Value
+        if ([version]$Target -le [version]$current) { throw "Release version $Target must be greater than the current $current." }
+        $manifest = [regex]::Replace($manifest, '(?m)^version = "[^"]+"', "version = `"$Target`"", 1)
+        [IO.File]::WriteAllText((Join-Path $root 'Cargo.toml'), $manifest)
+        Use-BuildEnvironment
+        Invoke-Step 'cargo update -p cf-gateway (lockfile)' { cargo update --offline -p cf-gateway }
+        Invoke-Test
+        git add Cargo.toml Cargo.lock
+        git commit --quiet -m "chore: release cf-gateway $Target"
+        if ($LASTEXITCODE) { throw 'git commit failed' }
+        git tag -a $tag -m "cf-gateway $Target"
+        if ($LASTEXITCODE) { throw 'git tag failed' }
+        Invoke-Step "git push origin cf $tag" { git push origin cf $tag }
+        Write-Host "released $Target as $(git rev-parse --short=9 HEAD); CI publishes :$Target, :latest and :sha-<commit>"
+    } finally { Pop-Location }
 }
 
 switch ($Command) {
@@ -156,7 +188,8 @@ switch ($Command) {
     'test' { Invoke-Test }
     'run' { $binary = Invoke-Build; Start-Gateway $binary }
     'stop' { Stop-Gateway }
-    'status' { Get-Status | Select-Object version, buildId, uptimeSeconds, requests, success, failed, active | Format-List }
+    'release' { if (-not $Version) { throw 'Pass -Version, e.g. scripts/dev.ps1 release -Version 0.2.15' }; Invoke-Release $Version }
+    'status' { Get-Status | Select-Object version, build, commit, dirty, binaryHash, uptimeSeconds, requests, success, failed, active | Format-List }
     'push' {
         Push-Location $root
         try {

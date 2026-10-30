@@ -583,14 +583,9 @@ async fn web_auth_source_address_and_raw_html_contracts() {
         .contains("script-src 'self'"));
     assert_eq!(index.headers()["cache-control"], "no-store");
     let html = index.text().await.unwrap();
-    let version = format!(
-        "v{} · {}",
-        cf_gateway::version::VERSION,
-        cf_gateway::version::build_id()
-    );
-    assert!(html.contains(&version));
-    assert!(!html.contains("{{VERSION}}"));
-    assert!(!html.contains("{{BUILD_ID}}"));
+    let build = cf_gateway::version::build();
+    assert!(html.contains(&format!(">{build}<")));
+    assert!(!html.contains("{{BUILD}}"));
     let status: serde_json::Value = client
         .get(format!("{}/v1/status", server.url))
         .bearer_auth("secret-local")
@@ -601,13 +596,12 @@ async fn web_auth_source_address_and_raw_html_contracts() {
         .await
         .unwrap();
     assert_eq!(status["version"], cf_gateway::version::VERSION);
-    assert_eq!(status["buildId"], cf_gateway::version::build_id());
-    assert!(
-        cf_gateway::version::build_id().len() == 12
-            && cf_gateway::version::build_id()
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit())
-    );
+    assert_eq!(status["buildId"], build);
+    assert_eq!(status["build"], build);
+    assert!(build.starts_with(cf_gateway::version::VERSION));
+    assert_eq!(status["dirty"], cf_gateway::version::identity().dirty);
+    let hash = status["binaryHash"].as_str().unwrap();
+    assert!(hash.len() == 12 && hash.bytes().all(|b| b.is_ascii_hexdigit()));
     assert_eq!(
         client
             .get(format!("{}/v1/status", server.url))

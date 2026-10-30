@@ -223,7 +223,7 @@ static STORE: OnceLock<(Option<Arc<LayoutStore>>, Option<String>)> = OnceLock::n
 pub fn configure(dir: Option<PathBuf>) -> Value {
     STORE.get_or_init(|| match dir {
         None => (None, Some("disabled".into())),
-        Some(dir) => match LayoutStore::open(&dir, crate::version::build_id()) {
+        Some(dir) => match LayoutStore::open(&dir, crate::version::build()) {
             Ok(store) => (Some(Arc::new(store)), None),
             Err(error) => (None, Some(error)),
         },

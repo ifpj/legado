@@ -11,9 +11,12 @@ RUN printf '%s\n' '#!/bin/sh' 'compiler="$1"; shift' \
 WORKDIR /app
 ARG TARGETARCH
 ARG BUILD_JOBS=2
+# `git describe` of the source commit, supplied by CI; build.rs reads it because .git is not in the context.
+ARG CF_GATEWAY_BUILD_VERSION=
 ENV CARGO_BUILD_JOBS=${BUILD_JOBS} CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 LIBCLANG_PATH=/usr/lib/llvm18/lib \
+    CF_GATEWAY_BUILD_VERSION=${CF_GATEWAY_BUILD_VERSION} \
     RUSTC_WRAPPER=/usr/local/bin/cf-rustc LANG=en_US.UTF-8 TZ=Asia/Shanghai
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY assets ./assets
 COPY profiles ./profiles

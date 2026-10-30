@@ -74,9 +74,7 @@ fn send_bytes(status: StatusCode, body: Vec<u8>, kind: &str) -> Response {
 async fn index() -> Response {
     let mut response = send(
         StatusCode::OK,
-        include_str!("../assets/index.html")
-            .replace("{{VERSION}}", crate::version::VERSION)
-            .replace("{{BUILD_ID}}", crate::version::build_id()),
+        include_str!("../assets/index.html").replace("{{BUILD}}", crate::version::build()),
         "text/html; charset=utf-8",
     );
     response.headers_mut().insert("content-security-policy","default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'".parse().unwrap());

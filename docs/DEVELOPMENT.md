@@ -128,6 +128,11 @@ Windows 测试机只保留一份源码：`services/cf-gateway` 是本仓库 `cf`
 `scripts/dev.ps1` 覆盖日常流程：`setup` 生成本机 cargo 配置；`build` 为 release 构建；`test` 依次执行格式、Rust 测试与 Node 检查；`run` 构建后原位替换 19705 上唯一的服务并等待 `/v1/status`；`push` 在干净的 `cf` 分支上先跑全部检查再推送。Docker 构建只使用 `.dockerignore` 白名单中的文件，本机脚本和配置不会进入镜像。
 
 Linux 开发机不使用这些脚本：安装 CMake、Clang/libclang、NASM 后直接运行下文的检查命令，或使用 Dockerfile。
+## 版本与发布
+
+构建标识只有一个来源：`build.rs` 在编译时运行 `git describe --tags --match cf-v* --long --dirty --always`，容器构建没有 `.git`，由 CI 通过 `CF_GATEWAY_BUILD_VERSION` 传入同一字符串；`version::parse` 把它和 Cargo.toml 版本合成 `build`：发布提交为 `0.2.14`，其后为 `0.2.14+<提交数>.g<提交>`，未提交修改再加 `.dirty.<程序哈希前 8 位>`，没有可达标签时为 `0.2.14+g<提交>`，没有 Git 时为 `0.2.14+unknown`。Web 头部、`/v1/status`（`build`、`buildId`、`commit`、`dirty`、`binaryHash`）、`cf-gateway --version` 和布局缓存的编译器标识都使用它。程序文件哈希只作诊断，不再作为版本。
+
+Cargo.toml 的版本号不要手工修改。`scripts/dev.ps1 release -Version X.Y.Z` 在干净且与 origin/cf 一致的 `cf` 分支上更新 Cargo.toml 与 Cargo.lock、执行全部检查、提交 `chore: release cf-gateway X.Y.Z`、创建附注标签 `cf-vX.Y.Z` 并把分支与标签一起推送。CI 对 `cf` 分支和 `cf-v*` 标签都会构建；发布任务重新计算 `git describe`，Cargo.toml 版本与最近的 `cf-v` 标签不一致即失败，距离为 0 时打 `:X.Y.Z`，否则打 `:X.Y.Z-<提交数>-g<提交>`；`:latest` 与 `:sha-<完整提交>` 每次推送都更新。验收记录里引用构建时写 `build` 字符串。
 ## 修改约束
 
 1. 先定位失败阶段。HTTP 200、Cookie 颁发、工作量计算完成都不等于取得目标网页。
