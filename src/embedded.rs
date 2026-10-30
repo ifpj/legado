@@ -191,7 +191,7 @@ pub fn api_build(url: &str) -> Result<String> {
             && u.port().is_none(),
         "Foreign widget API",
     )?;
-    re(r"^/turnstile/v0/b/([a-f0-9]{12})/api\.js$")
+    re(r"^/turnstile/v0/[bg]/([a-f0-9]{12})/api\.js$")
         .captures(u.path())
         .map(|c| c[1].to_string())
         .ok_or_else(|| Error::new("EMBEDDED_BUILD_UNSUPPORTED", "无法确认嵌入式验证组件版本"))
@@ -289,6 +289,16 @@ mod tests {
                 .is_ok()
         );
         assert!(api_build("https://other.example/turnstile/v0/b/d2d3316b729e/api.js").is_err());
+        assert_eq!(
+            api_build("https://challenges.cloudflare.com/turnstile/v0/g/c787ce48cf6b/api.js")
+                .unwrap(),
+            "c787ce48cf6b"
+        );
+        assert!(
+            api_build("https://challenges.cloudflare.com/turnstile/v0/x/c787ce48cf6b/api.js")
+                .is_err()
+        );
+        assert!(api_build("https://challenges.cloudflare.com/turnstile/v0/api.js").is_err());
     }
 
     #[test]
