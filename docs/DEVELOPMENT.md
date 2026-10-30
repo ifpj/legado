@@ -112,6 +112,22 @@ HTTP 响应文字与其 HTML Facts 由不可变 Document 持有，同一响应�
 父初始化脚本解析一次后，用原始语法树读取当前封存密钥，同时进行字面量解码；首个提交响应仍在核对完成后才解码。字面量解码只把解码调用替换为字符串，密钥数组若无需这些调用即可求值，两种源码得到同样的数值。原始树读取与布局一致时直接通过；读取失败或结果不同，一律回退到完整的解码源码核对，不能把差异当作通过。封存密钥声明扫描先检查右侧是否为数组字面量，再解析下标目标，避免对大量同对象写入逐个求值。
 
 组件配置与布局分析读取同一份当轮组件脚本，两者并行且都必须成功；配置查找仍解析整个脚本，只深入包含目标名称的语法范围。工作量证明所需的组件页面事实在任务提交请求期间准备，只在响应要求工作量时使用。协议任务时间、工作量预算、等待下限和重试上限不变。
+## 本机布局
+
+Windows 测试机只保留一份源码：`services/cf-gateway` 是本仓库 `cf` 分支的 git worktree，所有修改、构建、验收和推送都在这里进行。不要为了诊断再复制一份源码到别处；需要对照旧版本时使用分支、提交或 `git worktree`，诊断用临时二进制可放在 `.local/`。
+
+| 路径 | 内容 | 是否入库 |
+| --- | --- | --- |
+| `src/ assets/ profiles/ tests/ docs/ scripts/` | 源码、静态资源、协议布局、测试、文档与本机脚本 | 是 |
+| `target/` | 唯一的 cargo 构建缓存；release 启用增量编译 | 否 |
+| `.local/tools/` | CMake、NASM、libclang；原生依赖（BoringSSL、bindgen）的构建工具 | 否 |
+| `.local/bin/` | 19705 服务正在运行的程序、`service.json`、日志 | 否 |
+| `.local/evidence/` | 本机验收记录；只放状态、长度、错误和耗时，不放正文、抓包、凭证 | 否 |
+| `.cargo/config.toml` | `scripts/dev.ps1 setup` 生成，把 `.local/tools` 提供给 cargo，并为本机 release 打开增量编译 | 否 |
+
+`scripts/dev.ps1` 覆盖日常流程：`setup` 生成本机 cargo 配置；`build` 为 release 构建；`test` 依次执行格式、Rust 测试与 Node 检查；`run` 构建后原位替换 19705 上唯一的服务并等待 `/v1/status`；`push` 在干净的 `cf` 分支上先跑全部检查再推送。Docker 构建只使用 `.dockerignore` 白名单中的文件，本机脚本和配置不会进入镜像。
+
+Linux 开发机不使用这些脚本：安装 CMake、Clang/libclang、NASM 后直接运行下文的检查命令，或使用 Dockerfile。
 ## 修改约束
 
 1. 先定位失败阶段。HTTP 200、Cookie 颁发、工作量计算完成都不等于取得目标网页。
@@ -133,6 +149,8 @@ node tests/twkan-cleanup.cjs
 node tests/content-cleanup.cjs
 docker build -t cf-gateway:test .
 ```
+
+Windows 测试机可用 `scripts/dev.ps1 test` 一次执行除 Docker 外的全部检查，`scripts/dev.ps1 push` 在检查通过后推送 `cf` 分支。
 
 Rust 测试不访问真实网站。tests/smoke-container.cjs 需要先启动容器，CI 使用宿主网络让容器访问临时本地上游；脚本不依赖外网和账号。CI 分别在原生 amd64、arm64 runner 构建、运行测试、验证实际容器，然后合并镜像清单。
 

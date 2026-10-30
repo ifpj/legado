@@ -1,5 +1,6 @@
 /target/
-/runtime/
+/.local/
+/.cargo/
 *.log
 .env
 .DS_Store

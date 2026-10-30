@@ -143,6 +143,8 @@ cargo build --release --locked
 cargo run --release -- serve --host 127.0.0.1 --port 19686
 ~~~
 
+Windows 开发机使用 `scripts/dev.ps1`（`test`、`build`、`run`、`push`），本机构建工具与运行中的服务放在 `.local/`；见 [开发与维护](docs/DEVELOPMENT.md)。
+
 默认绑定本机。容器显式绑定 0.0.0.0。CF_GATEWAY_TIMEZONE 默认 Asia/Shanghai。只有显式传入 --capture-dir 才写诊断文件；发布默认关闭。
 
 ## 开发资料

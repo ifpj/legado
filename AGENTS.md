@@ -4,6 +4,8 @@ This orphan branch contains only the Rust service. Read README.md and docs/DEVEL
 
 - This local Windows/ADB workspace is a test environment. Keep exactly one CF Gateway service on fixed port 19705 and update that instance in place. Use the same port for Web review, phone source imports and acceptance. Do not keep parallel stable/preview services, allocate temporary acceptance ports, or restore an older service after testing unless the user explicitly asks.
 
+- `services/cf-gateway` (the `cf` branch worktree) is the only source checkout on this machine. Do not copy the tree elsewhere for diagnostics; use commits, branches or `git worktree` and keep throwaway binaries under `.local/`. Build caches live in `target/`, build tools and the running service under `.local/` (both ignored). Use `scripts/dev.ps1 test|run|push` for checks, in-place service updates and pushing; see docs/DEVELOPMENT.md.
+
 - Preserve the native runtime: no Python, browser process, nokk or general JavaScript execution in the service path.
 - Work from current response data. Never replace unknown tasks with recorded answers, stale keys or previous authorization state.
 - Keep website responses fresh. Do not introduce HTML/content caching to make latency figures look better.
